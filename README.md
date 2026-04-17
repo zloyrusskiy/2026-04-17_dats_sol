@@ -61,9 +61,21 @@ venv/bin/python scripts/session_viewer.py --cell-size 24
 - логи, привязанные к конкретному ходу
 - `decision/response` для каждого кадра
 
-## Recorder с пустой стратегией
+## Recorder и управление стратегией
 
-Скрипт [scripts/run_session.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/run_session.py:1) запускает session recorder. Для запуска нужно явно выбрать стратегию через `--strategy`; сейчас доступна [PassiveStrategy](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/cherviak/strategies/passive.py:1), которая не отправляет команд и просто пишет историю арены и логов по активным раундам.
+Скрипт [scripts/run_session.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/run_session.py:1) запускает session recorder. Стратегия выбирается явно через `--strategy`.
+
+Сейчас доступны:
+- `passive` — [PassiveStrategy](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/cherviak/strategies/passive.py:1), ничего не отправляет и только пишет историю арены и логов
+- `lateral` — [LateralStrategy](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/cherviak/strategies/lateral.py:1), «рыба-червяк» с боковыми ответвлениями
+
+Как этим управлять:
+- для безопасного dry-run запускай без `--submit`
+- чтобы стратегия реально отправляла команды, добавь `--submit`
+- если `--strategy` не указан, скрипт покажет список доступных стратегий
+- в консоль логика раннера пишет сообщения уровня `INFO`
+- HTTP-запросы и ответы пишутся на уровне `DEBUG`
+- для каждого нового хода в лог попадает `decision_time_ms` — сколько стратегия думала над `decide_turn`
 
 Примеры:
 
@@ -71,6 +83,7 @@ venv/bin/python scripts/session_viewer.py --cell-size 24
 venv/bin/python scripts/run_session.py --strategy passive
 venv/bin/python scripts/run_session.py --strategy passive --logs-interval 3
 venv/bin/python scripts/run_session.py --strategy passive --submit
+venv/bin/python scripts/run_session.py --strategy lateral --submit
 ```
 
 Что пишет:

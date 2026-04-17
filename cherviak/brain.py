@@ -86,26 +86,38 @@ def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
         occupied.add(tuple(p.position))
     for e in arena.enemy:
         occupied.add(tuple(e.position))
-    for c in arena.construction:
-        occupied.add(tuple(c.position))
+    construction_progress: dict[tuple[int, int], int] = {
+        (c.position[0], c.position[1]): c.progress for c in arena.construction
+    }
     mountains = {tuple(m) for m in arena.mountains}
     beaver_positions = [b.position for b in arena.beavers]
     haz = hazardous_positions(arena)
 
-    def is_safe(c: Position) -> bool:
+    def is_safe(c: Position, allow_construction: bool = False, ignore_haz: bool = False) -> bool:
         if c[0] < 0 or c[1] < 0 or c[0] >= arena.size[0] or c[1] >= arena.size[1]:
             return False
         ct = (c[0], c[1])
         if ct in occupied or ct in mountains:
             return False
-        if (c[0], c[1]) in haz:
+        if not allow_construction and ct in construction_progress:
+            return False
+        if not ignore_haz and ct in haz:
             return False
         for bp in beaver_positions:
             if chebyshev(c, bp) <= 2:
                 return False
         return True
 
-    safe = [c for c in cardinal_neighbors(hq.position) if is_safe(c)]
+    neighbors = cardinal_neighbors(hq.position)
+    in_progress = [
+        c for c in neighbors
+        if (c[0], c[1]) in construction_progress
+        and is_safe(c, allow_construction=True, ignore_haz=True)
+    ]
+    if in_progress:
+        return max(in_progress, key=lambda c: construction_progress[(c[0], c[1])])
+
+    safe = [c for c in neighbors if is_safe(c)]
     if not safe:
         return None
     return min(safe, key=nearest_bonus_distance)
@@ -128,6 +140,7 @@ def build_commands(arena: Arena, target: Position) -> list[list[Position]]:
 
 
 LATERAL_THRESHOLD = 70
+HQ_RELOCATE_THRESHOLD = 70
 
 
 def lateral_targets(arena: Arena) -> list[tuple[Plantation, Position]]:
@@ -144,19 +157,18 @@ def lateral_targets(arena: Arena) -> list[tuple[Plantation, Position]]:
         occupied.add(tuple(p.position))
     for e in arena.enemy:
         occupied.add(tuple(e.position))
-    for c in arena.construction:
-        occupied.add(tuple(c.position))
+    construction_set = {(c.position[0], c.position[1]) for c in arena.construction}
     mountains = {tuple(m) for m in arena.mountains}
     beaver_positions = [b.position for b in arena.beavers]
     haz = hazardous_positions(arena)
 
-    def is_safe(c: Position) -> bool:
+    def is_safe(c: Position, ignore_haz: bool = False) -> bool:
         if c[0] < 0 or c[1] < 0 or c[0] >= arena.size[0] or c[1] >= arena.size[1]:
             return False
         ct = (c[0], c[1])
         if ct in occupied or ct in mountains:
             return False
-        if (c[0], c[1]) in haz:
+        if not ignore_haz and ct in haz:
             return False
         for bp in beaver_positions:
             if chebyshev(c, bp) <= 2:
@@ -179,6 +191,13 @@ def lateral_targets(arena: Arena) -> list[tuple[Plantation, Position]]:
             cands = [[p.position[0], p.position[1] + 1], [p.position[0], p.position[1] - 1]]
         else:
             cands = [[p.position[0] + 1, p.position[1]], [p.position[0] - 1, p.position[1]]]
+        in_progress = [
+            c for c in cands
+            if (c[0], c[1]) in construction_set and is_safe(c, ignore_haz=True)
+        ]
+        if in_progress:
+            out.append((p, in_progress[0]))
+            continue
         safe = [c for c in cands if is_safe(c)]
         if not safe:
             continue
@@ -187,39 +206,58 @@ def lateral_targets(arena: Arena) -> list[tuple[Plantation, Position]]:
 
 
 def check_relocate(arena: Arena) -> Optional[list[Position]]:
-    """If a freshly built plantation is cardinally adjacent to HQ,
-    return [hq.position, fresh.position] for relocateMain. Else None.
+    """Return [hq.position, candidate.position] for a safe adjacent HQ move.
 
-    'Freshly built' = immunityUntilTurn - turn_no >= 2 (built this turn,
-    has remaining 3-turn immunity).
+    We relocate aggressively once the HQ cell is close to completion, because
+    losing a main plantation on a 95% cell is much more common than losing a
+    branch. Fresh adjacent plantations remain the top priority.
     """
     hq = next((p for p in arena.plantations if p.is_main), None)
     if hq is None:
         return None
 
     haz = hazardous_positions(arena)
+    cell_progress = {
+        (cell.position[0], cell.position[1]): cell.terraformation_progress for cell in arena.cells
+    }
+    hq_progress = cell_progress.get((hq.position[0], hq.position[1]), 0)
+
+    candidates: list[tuple[tuple[int, int, int, int], Plantation]] = []
     for p in arena.plantations:
         if p.is_main or p.is_isolated:
             continue
         if not is_cardinal_neighbor(p.position, hq.position):
             continue
-        if p.immunity_until_turn - arena.turn_no < 2:
-            continue
         if is_hazardous(p.position, haz, arena.beavers, beaver_buffer=3):
             continue
-        return [hq.position, p.position]
-    return None
+        freshness = p.immunity_until_turn - arena.turn_no
+        if freshness < 2 and hq_progress < HQ_RELOCATE_THRESHOLD:
+            continue
+        candidate_progress = cell_progress.get((p.position[0], p.position[1]), 0)
+        # Prefer fresh plantations first; once HQ is in danger, prefer the
+        # least-completed neighboring cell so the new HQ survives longer.
+        priority = (
+            0 if freshness >= 2 else 1,
+            candidate_progress,
+            -freshness,
+            -p.hp,
+        )
+        candidates.append((priority, p))
+    if not candidates:
+        return None
+    _, best = min(candidates, key=lambda item: item[0])
+    return [hq.position, best.position]
 
 
 UPGRADE_ORDER = [
-    "repair_power",
-    "signal_range",
     "settlement_limit",
-    "decay_mitigation",
     "max_hp",
-    "vision_range",
     "earthquake_mitigation",
+    "signal_range",
+    "decay_mitigation",
     "beaver_damage_mitigation",
+    "vision_range",
+    "repair_power",
 ]
 
 
@@ -234,36 +272,10 @@ def pick_upgrade(arena: Arena) -> str:
     return ""
 
 
-def decide_turn(arena: Arena) -> Optional[dict]:
+def decide_turn_lateral(arena: Arena) -> Optional[dict]:
     """Compose all decisions into a request body. Returns None if there is
     nothing useful to send (server requires at least one of command/upgrade/
-    relocateMain)."""
-    hq = next((p for p in arena.plantations if p.is_main), None)
-    if hq is None:
-        return None
-
-    target = pick_target(arena, hq)
-    commands: list[list[Position]] = []
-    if target is not None:
-        commands = build_commands(arena, target)
-
-    relocate = check_relocate(arena)
-    upgrade = pick_upgrade(arena)
-
-    if not commands and not relocate and not upgrade:
-        return None
-
-    body: dict = {
-        "command": [{"path": c} for c in commands],
-        "plantationUpgrade": upgrade,
-    }
-    if relocate is not None:
-        body["relocateMain"] = relocate
-    return body
-
-
-def decide_turn_lateral(arena: Arena) -> Optional[dict]:
-    """Composer that extends decide_turn with lateral-branch builds."""
+    relocateMain). Includes lateral-branch builds."""
     hq = next((p for p in arena.plantations if p.is_main), None)
     if hq is None:
         return None

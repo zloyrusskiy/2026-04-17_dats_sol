@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from dataclasses import asdict, is_dataclass
@@ -20,13 +21,12 @@ if str(ROOT_DIR) not in sys.path:
 
 from cherviak.client import GameClient
 from cherviak.config import load_config
-from cherviak.strategies import LateralStrategy, MvpStrategy, PassiveStrategy
+from cherviak.strategies import LateralStrategy, PassiveStrategy
 
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/sessions")
 STRATEGIES = {
     PassiveStrategy.name: PassiveStrategy,
-    MvpStrategy.name: MvpStrategy,
     LateralStrategy.name: LateralStrategy,
 }
 
@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=5.0,
         help="Пауза между проверками, когда активной игры нет.",
+    )
+    parser.add_argument(
+        "--min-request-interval",
+        type=float,
+        default=0.35,
+        help="Минимальный интервал между любыми HTTP-запросами. По умолчанию 0.35.",
     )
     parser.add_argument(
         "--submit",
@@ -116,7 +122,103 @@ def write_meta(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def compute_retry_after_seconds(exc: httpx.HTTPStatusError, default: float) -> float:
+    retry_after = exc.response.headers.get("Retry-After", "").strip()
+    try:
+        retry_after_seconds = float(retry_after)
+    except ValueError:
+        retry_after_seconds = 0.0
+    return max(default, retry_after_seconds)
+
+
+def compute_logs_backoff_seconds(exc: httpx.HTTPStatusError, default: float) -> float:
+    return compute_retry_after_seconds(exc, default)
+
+
+def describe_command_status(
+    command: dict[str, Any] | None,
+    submit_enabled: bool,
+    response: dict[str, Any] | None,
+) -> str:
+    if command is None:
+        return "none"
+    if not submit_enabled:
+        return "planned"
+    if not isinstance(response, dict):
+        return "failed"
+    if response.get("skipped"):
+        return str(response["skipped"])
+    status_code = response.get("statusCode")
+    if status_code is not None:
+        return f"http_{status_code}"
+    if response.get("error"):
+        return "failed"
+    if response.get("errors"):
+        return "sent_with_errors"
+    return "sent"
+
+
+def format_position(position: list[int]) -> str:
+    return f"[{position[0]},{position[1]}]"
+
+
+def summarize_construction(arena: Any) -> str:
+    if not arena.construction:
+        return "0"
+    items = [f"{format_position(item.position)}={item.progress}" for item in arena.construction[:3]]
+    if len(arena.construction) > 3:
+        items.append(f"+{len(arena.construction) - 3} more")
+    return f"{len(arena.construction)}:{','.join(items)}"
+
+
+def summarize_decision(command: dict[str, Any] | None) -> str:
+    if not command:
+        return "-"
+    actions = command.get("command") or []
+    targets: list[str] = []
+    for action in actions[:3]:
+        path = action.get("path") if isinstance(action, dict) else None
+        if isinstance(path, list) and len(path) >= 3 and isinstance(path[2], list) and len(path[2]) == 2:
+            targets.append(format_position(path[2]))
+        else:
+            targets.append("?")
+    if len(actions) > 3:
+        targets.append(f"+{len(actions) - 3}")
+
+    relocate = command.get("relocateMain")
+    relocate_summary = "-"
+    if isinstance(relocate, list) and len(relocate) >= 2:
+        relocate_summary = f"{format_position(relocate[0])}->{format_position(relocate[1])}"
+
+    upgrade = command.get("plantationUpgrade") or "-"
+    target_summary = ",".join(targets) if targets else "-"
+    return (
+        f"actions={len(actions)} "
+        f"targets={target_summary} "
+        f"relocate={relocate_summary} "
+        f"upgrade={upgrade}"
+    )
+
+
+def summarize_response_errors(response: dict[str, Any] | None) -> str:
+    if not isinstance(response, dict):
+        return "-"
+    errors = response.get("errors")
+    if not errors:
+        return "-"
+    messages = [str(item) for item in errors[:2]]
+    if len(errors) > 2:
+        messages.append(f"+{len(errors) - 2}")
+    return " | ".join(messages)
+
+
+def configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("cherviak.client").setLevel(logging.DEBUG)
+
+
 def main() -> int:
+    configure_logging()
     args = parse_args()
     config = load_config()
     strategy = STRATEGIES[args.strategy]()
@@ -135,6 +237,7 @@ def main() -> int:
             "submit": args.submit,
             "logsInterval": args.logs_interval,
             "idleSleep": args.idle_sleep,
+            "minRequestInterval": args.min_request_interval,
         },
     )
 
@@ -142,10 +245,16 @@ def main() -> int:
 
     last_turn_no: int | None = None
     last_logs_poll = 0.0
+    logs_backoff_until = 0.0
+    command_backoff_until = 0.0
     seen_log_keys: set[tuple[str, str]] = set()
     active_round = False
 
-    with GameClient(config) as client:
+    with GameClient(
+        config,
+        log_requests=True,
+        min_request_interval=args.min_request_interval,
+    ) as client:
         while True:
             now = time.monotonic()
             try:
@@ -204,15 +313,47 @@ def main() -> int:
                 active_round = True
 
             if arena.turn_no != last_turn_no:
+                decision_started_at = time.perf_counter()
                 command = strategy.decide_turn(arena)
+                decision_elapsed_ms = (time.perf_counter() - decision_started_at) * 1000
                 response = None
                 if args.submit and command:
-                    try:
-                        response = client.post_command(command)
-                    except httpx.HTTPError as exc:
-                        response = {"error": str(exc)}
+                    submit_now = time.monotonic()
+                    if submit_now < command_backoff_until:
+                        response = {
+                            "skipped": "rate_limit_backoff",
+                            "retryInSeconds": round(command_backoff_until - submit_now, 3),
+                        }
+                    else:
+                        try:
+                            response = client.post_command(command)
+                            command_backoff_until = 0.0
+                        except httpx.HTTPStatusError as exc:
+                            response = {
+                                "error": str(exc),
+                                "statusCode": exc.response.status_code,
+                                "body": exc.response.text,
+                            }
+                            if exc.response.status_code == 429:
+                                backoff_seconds = compute_retry_after_seconds(
+                                    exc,
+                                    default=max(arena.next_turn_in, args.min_request_interval, 1.0),
+                                )
+                                command_backoff_until = time.monotonic() + backoff_seconds
+                                response["retryInSeconds"] = backoff_seconds
+                                logging.warning(
+                                    "turn=%s command rate-limited; backoff %.2f s",
+                                    arena.turn_no,
+                                    backoff_seconds,
+                                )
+                        except httpx.HTTPError as exc:
+                            response = {"error": str(exc)}
 
                 strategy.on_turn_result(arena, command, response)
+                command_status = describe_command_status(command, args.submit, response)
+                construction_status = summarize_construction(arena)
+                decision_summary = summarize_decision(command)
+                response_errors = summarize_response_errors(response)
                 append_jsonl(
                     turns_path,
                     {
@@ -220,20 +361,42 @@ def main() -> int:
                         "kind": "turn",
                         "turnNo": arena.turn_no,
                         "nextTurnIn": arena.next_turn_in,
+                        "strategyElapsedMs": round(decision_elapsed_ms, 3),
                         "arena": serialize(arena),
                         "decision": command,
                         "response": response,
                     },
                 )
-                print(
-                    f"turn={arena.turn_no} plantations={len(arena.plantations)} "
-                    f"cells={len(arena.cells)} command={'yes' if command else 'no'}"
+                logging.info(
+                    "turn=%s decision_time_ms=%.1f plantations=%s cells=%s construction=%s decision=%s command=%s errors=%s",
+                    arena.turn_no,
+                    decision_elapsed_ms,
+                    len(arena.plantations),
+                    len(arena.cells),
+                    construction_status,
+                    decision_summary,
+                    command_status,
+                    response_errors,
                 )
                 last_turn_no = arena.turn_no
 
-            if now - last_logs_poll >= args.logs_interval:
+            if now >= logs_backoff_until and now - last_logs_poll >= args.logs_interval:
                 try:
                     logs = client.get_logs()
+                except httpx.HTTPStatusError as exc:
+                    append_jsonl(
+                        logs_path,
+                        {
+                            "capturedAt": utc_now(),
+                            "kind": "logs_error",
+                            "statusCode": exc.response.status_code,
+                            "body": exc.response.text,
+                        },
+                    )
+                    if exc.response.status_code == 429:
+                        logs_backoff_until = now + compute_logs_backoff_seconds(
+                            exc, default=max(args.logs_interval, 5.0)
+                        )
                 except httpx.HTTPError as exc:
                     append_jsonl(
                         logs_path,
@@ -257,6 +420,7 @@ def main() -> int:
                                 "entry": item,
                             },
                         )
+                    logs_backoff_until = 0.0
                 last_logs_poll = now
 
             sleep_for = min(max(arena.next_turn_in, 0.1), 1.0)

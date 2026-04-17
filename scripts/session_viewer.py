@@ -27,6 +27,17 @@ SPAWN_PLANTATION_RE = re.compile(
     r"Spawned (?:(MAIN) )?plantation at \[(\d+)\s+(\d+)\](?: \(HP=(\d+)\))?",
     re.IGNORECASE,
 )
+LEGEND_ITEMS = [
+    {"color": "#fff7d6", "label": "bonus cell"},
+    {"color": "#7b8794", "label": "mountain"},
+    {"color": "#9fb3ff", "label": "construction"},
+    {"color": "#0e9f6e", "label": "your plantation"},
+    {"color": "#98a2b3", "label": "isolated plantation"},
+    {"color": "#f0b429", "label": "your HQ"},
+    {"color": "#d64545", "label": "enemy plantation"},
+    {"color": "#8d6e63", "label": "beaver"},
+    {"color": "#8d2b0b", "label": "spawn highlight"},
+]
 
 
 @dataclass(frozen=True)
@@ -73,12 +84,58 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        rows.append(json.loads(line))
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
     return rows
+
+
+def summarize_session(session_path: Path) -> dict[str, Any]:
+    meta_path = session_path / "meta.json"
+    turns_path = session_path / "turns.jsonl"
+    logs_path = session_path / "logs.jsonl"
+
+    meta = load_json(meta_path) if meta_path.exists() else {}
+    frame_count = 0
+    first_turn: int | None = None
+    last_turn: int | None = None
+
+    with turns_path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("kind") != "turn":
+                continue
+            turn_no = row.get("turnNo")
+            if not isinstance(turn_no, int):
+                continue
+            frame_count += 1
+            if first_turn is None:
+                first_turn = turn_no
+            last_turn = turn_no
+
+    log_count = 0
+    if logs_path.exists():
+        with logs_path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                if raw_line.strip():
+                    log_count += 1
+
+    return {
+        "id": session_path.name,
+        "label": session_path.name,
+        "startedAt": meta.get("startedAt"),
+        "strategy": meta.get("strategy"),
+        "frameCount": frame_count,
+        "logCount": log_count,
+        "firstTurn": first_turn,
+        "lastTurn": last_turn,
+    }
 
 
 def extract_turn_from_log(entry: dict[str, Any]) -> int | None:
@@ -149,10 +206,9 @@ def parse_spawn_event(message: str) -> dict[str, Any] | None:
 def render_svg(arena: dict[str, Any], cell_size: int, overlays: list[dict[str, Any]] | None = None) -> str:
     width, height = arena["size"]
     margin = 42
-    legend_width = 270
     map_width = width * cell_size
     map_height = height * cell_size
-    canvas_width = map_width + margin * 2 + legend_width
+    canvas_width = map_width + margin * 2
     canvas_height = max(map_height + margin * 2, 420)
 
     def cell_origin(x: int, y: int) -> tuple[int, int]:
@@ -174,7 +230,6 @@ def render_svg(arena: dict[str, Any], cell_size: int, overlays: list[dict[str, A
         ".small { font-size: 11px; fill: #52606d; }",
         ".label { font-size: 12px; fill: #102a43; }",
         ".title { font-size: 20px; font-weight: bold; fill: #102a43; }",
-        ".legend { font-size: 13px; fill: #243b53; }",
         "</style>",
         svg_rect(0, 0, canvas_width, canvas_height, fill="#f4f7fb"),
         svg_rect(margin, margin, map_width, map_height, fill="#ffffff", stroke="#bcccdc"),
@@ -348,38 +403,23 @@ def render_svg(arena: dict[str, Any], cell_size: int, overlays: list[dict[str, A
             )
         )
 
-    legend_x = margin + map_width + 24
-    legend_y = margin
-    svg.append(svg_text(legend_x, legend_y, "DatsSol Session Frame", class_="title"))
-    info_lines = [
-        f"turn: {arena.get('turnNo', '?')}",
-        f"size: {width}x{height}",
-        f"actionRange: {arena.get('actionRange', '?')}",
-        f"plantations: {len(arena.get('plantations', []))}",
-        f"cells: {len(arena.get('cells', []))}",
-    ]
-    for index, line in enumerate(info_lines, start=1):
-        svg.append(svg_text(legend_x, legend_y + 24 + index * 18, line, class_="legend"))
-
-    legend_items = [
-        ("#fff7d6", "bonus cell"),
-        ("#7b8794", "mountain"),
-        ("#9fb3ff", "construction"),
-        ("#0e9f6e", "your plantation"),
-        ("#98a2b3", "isolated plantation"),
-        ("#f0b429", "your HQ"),
-        ("#d64545", "enemy plantation"),
-        ("#8d6e63", "beaver"),
-        ("#8d2b0b", "spawn highlight"),
-    ]
-    base_y = legend_y + 160
-    for index, (color, label) in enumerate(legend_items):
-        item_y = base_y + index * 28
-        svg.append(svg_rect(legend_x, item_y - 12, 16, 16, fill=color, stroke="#52606d"))
-        svg.append(svg_text(legend_x + 26, item_y, label, class_="legend"))
-
     svg.append("</svg>")
     return "\n".join(svg)
+
+
+def build_legend(arena: dict[str, Any]) -> dict[str, Any]:
+    width, height = arena["size"]
+    return {
+        "title": "DatsSol Session Frame",
+        "stats": [
+            f"turn: {arena.get('turnNo', '?')}",
+            f"size: {width}x{height}",
+            f"actionRange: {arena.get('actionRange', '?')}",
+            f"plantations: {len(arena.get('plantations', []))}",
+            f"cells: {len(arena.get('cells', []))}",
+        ],
+        "items": LEGEND_ITEMS,
+    }
 
 
 def build_logs_by_turn(log_rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -440,7 +480,9 @@ def load_session(session_path_str: str, cell_size: int) -> dict[str, Any]:
                 "plantations": plantation_count,
                 "cells": cell_count,
                 "hqHp": None if hq is None else hq.get("hp"),
+                "hqPosition": None if hq is None else hq.get("position"),
                 "svg": render_svg(arena, cell_size, overlays),
+                "legend": build_legend(arena),
                 "logs": frame_logs,
                 "decision": row.get("decision"),
                 "response": row.get("response"),
@@ -458,7 +500,7 @@ def load_session(session_path_str: str, cell_size: int) -> dict[str, Any]:
     }
 
 
-def list_sessions(sessions_dir: Path, cell_size: int) -> list[dict[str, Any]]:
+def list_sessions(sessions_dir: Path) -> list[dict[str, Any]]:
     sessions: list[dict[str, Any]] = []
     if not sessions_dir.exists():
         return sessions
@@ -468,20 +510,7 @@ def list_sessions(sessions_dir: Path, cell_size: int) -> list[dict[str, Any]]:
             continue
         if not (session_dir / "turns.jsonl").exists():
             continue
-        session = load_session(str(session_dir.resolve()), cell_size)
-        frames = session["frames"]
-        sessions.append(
-            {
-                "id": session["id"],
-                "label": session["label"],
-                "startedAt": session["meta"].get("startedAt"),
-                "strategy": session["meta"].get("strategy"),
-                "frameCount": len(frames),
-                "logCount": session["logCount"],
-                "firstTurn": None if not frames else frames[0]["turnNo"],
-                "lastTurn": None if not frames else frames[-1]["turnNo"],
-            }
-        )
+        sessions.append(summarize_session(session_dir.resolve()))
     return sessions
 
 
@@ -641,12 +670,59 @@ def render_index_html() -> str:
     .viewer {
       position: relative;
       overflow: hidden;
-      margin: 12px;
       border: 1px solid var(--border);
       border-radius: 16px;
       background: #fffaf2;
       min-height: 420px;
       cursor: grab;
+    }
+    .viewer-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+      gap: 12px;
+      align-items: start;
+      padding: 12px;
+      min-height: 0;
+      overflow: auto;
+    }
+    .viewer-legend {
+      position: sticky;
+      top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.82);
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      backdrop-filter: blur(8px);
+    }
+    .viewer-legend-title {
+      margin: 0;
+      font-size: 18px;
+    }
+    .viewer-legend-stats {
+      display: grid;
+      gap: 6px;
+      color: #243b53;
+      font: 13px/1.35 'SFMono-Regular', 'Menlo', monospace;
+    }
+    .viewer-legend-items {
+      display: grid;
+      gap: 10px;
+    }
+    .viewer-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      color: #243b53;
+    }
+    .viewer-legend-swatch {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      border: 1px solid #52606d;
+      flex: 0 0 auto;
     }
     .axis-overlay {
       position: absolute;
@@ -748,6 +824,12 @@ def render_index_html() -> str:
       .main-header {
         padding-right: 12px;
       }
+      .viewer-layout {
+        grid-template-columns: 1fr;
+      }
+      .viewer-legend {
+        position: static;
+      }
     }
   </style>
 </head>
@@ -778,16 +860,26 @@ def render_index_html() -> str:
         <input id="frameSlider" type="range" min="0" max="0" value="0" />
         <button id="zoomOutBtn">-</button>
         <button id="zoomInBtn">+</button>
+        <button id="centerHqBtn">ЦУ</button>
         <button id="fitBtn">Fit</button>
         <span id="frameStatus" class="pill">No frame</span>
       </div>
-      <div id="viewer" class="viewer">
-        <div id="content"></div>
-        <div class="axis-overlay" id="axisOverlay">
-          <div class="axis-corner"></div>
-          <div class="axis-x" id="xAxis"></div>
-          <div class="axis-y" id="yAxis"></div>
+      <div class="viewer-layout">
+        <div id="viewer" class="viewer">
+          <div id="content"></div>
+          <div class="axis-overlay" id="axisOverlay">
+            <div class="axis-corner"></div>
+            <div class="axis-x" id="xAxis"></div>
+            <div class="axis-y" id="yAxis"></div>
+          </div>
         </div>
+        <aside id="viewerLegend" class="viewer-legend">
+          <h3 class="viewer-legend-title">Legend</h3>
+          <div class="viewer-legend-stats">
+            <div>Выберите кадр.</div>
+          </div>
+          <div class="viewer-legend-items"></div>
+        </aside>
       </div>
       <div class="info">
         <div id="frameMeta" class="subtitle">Нет выбранного кадра.</div>
@@ -807,6 +899,7 @@ def render_index_html() -> str:
     const framePayloadEl = document.getElementById('framePayload');
     const contentEl = document.getElementById('content');
     const viewerEl = document.getElementById('viewer');
+    const viewerLegendEl = document.getElementById('viewerLegend');
     const xAxisEl = document.getElementById('xAxis');
     const yAxisEl = document.getElementById('yAxis');
     const sliderEl = document.getElementById('frameSlider');
@@ -900,11 +993,57 @@ def render_index_html() -> str:
       applyTransform();
     }
 
+    function centerOnHq() {
+      if (!currentSession || !currentSession.frames.length) return;
+      const frame = currentSession.frames[currentIndex];
+      const hqPosition = frame?.hqPosition;
+      const svg = contentEl.querySelector('svg');
+      const axis = getAxisConfig(svg);
+      if (!axis || !Array.isArray(hqPosition) || hqPosition.length !== 2) {
+        return;
+      }
+      const [hqX, hqY] = hqPosition;
+      const targetX = axis.margin + (hqX + 0.5) * axis.cellSize;
+      const targetY = axis.margin + (hqY + 0.5) * axis.cellSize;
+      translateX = viewerEl.clientWidth / 2 - targetX * scale;
+      translateY = viewerEl.clientHeight / 2 - targetY * scale;
+      applyTransform();
+    }
+
     function stopPlayback() {
       if (!timer) return;
       clearInterval(timer);
       timer = null;
       playBtn.textContent = 'Play';
+    }
+
+    function renderLegend(frame) {
+      const legend = frame?.legend;
+      if (!legend) {
+        viewerLegendEl.innerHTML = `
+          <h3 class="viewer-legend-title">Legend</h3>
+          <div class="viewer-legend-stats"><div>Нет данных для легенды.</div></div>
+          <div class="viewer-legend-items"></div>
+        `;
+        return;
+      }
+
+      const stats = Array.isArray(legend.stats) ? legend.stats : [];
+      const items = Array.isArray(legend.items) ? legend.items : [];
+      viewerLegendEl.innerHTML = `
+        <h3 class="viewer-legend-title">${legend.title || 'Legend'}</h3>
+        <div class="viewer-legend-stats">
+          ${stats.map((line) => `<div>${line}</div>`).join('')}
+        </div>
+        <div class="viewer-legend-items">
+          ${items.map((item) => `
+            <div class="viewer-legend-item">
+              <span class="viewer-legend-swatch" style="background:${item.color || '#fff'}"></span>
+              <span>${item.label || ''}</span>
+            </div>
+          `).join('')}
+        </div>
+      `;
     }
 
     function renderFrame(index, preserveTransform = true) {
@@ -914,6 +1053,7 @@ def render_index_html() -> str:
         frameMetaEl.textContent = 'Нет выбранного кадра.';
         frameLogsEl.innerHTML = '';
         framePayloadEl.textContent = 'decision/response появятся здесь';
+        renderLegend(null);
         return;
       }
 
@@ -921,6 +1061,7 @@ def render_index_html() -> str:
       const frame = currentSession.frames[currentIndex];
       sliderEl.value = String(currentIndex);
       contentEl.innerHTML = frame.svg;
+      renderLegend(frame);
       frameStatusEl.textContent =
         `turn ${frame.turnNo} • ${currentIndex + 1}/${currentSession.frames.length} • plantations ${frame.plantations} • cells ${frame.cells}`;
       frameMetaEl.textContent =
@@ -982,7 +1123,8 @@ def render_index_html() -> str:
       sessions = await response.json();
       renderSessionButtons();
       if (sessions.length > 0) {
-        await loadSession(sessions[0].id);
+        const latestSession = sessions[0];
+        await loadSession(latestSession.id);
       }
     }
 
@@ -1025,6 +1167,7 @@ def render_index_html() -> str:
     document.getElementById('playBtn').addEventListener('click', () => togglePlayback());
     document.getElementById('zoomInBtn').addEventListener('click', () => { scale *= 1.15; applyTransform(); });
     document.getElementById('zoomOutBtn').addEventListener('click', () => { scale /= 1.15; applyTransform(); });
+    document.getElementById('centerHqBtn').addEventListener('click', () => centerOnHq());
     document.getElementById('fitBtn').addEventListener('click', () => fitView());
     openSidebarBtn.addEventListener('click', () => setSidebarCollapsed(false));
     closeSidebarBtn.addEventListener('click', () => setSidebarCollapsed(true));
@@ -1085,7 +1228,7 @@ class SessionRequestHandler(BaseHTTPRequestHandler):
             self.respond_html(render_index_html())
             return
         if parsed.path == "/api/sessions":
-            payload = list_sessions(self.server.app_config.sessions_dir, self.server.app_config.cell_size)
+            payload = list_sessions(self.server.app_config.sessions_dir)
             self.respond_json(payload)
             return
         if parsed.path.startswith("/api/sessions/"):

@@ -88,14 +88,14 @@ def test_pick_target_skips_occupied_cells():
     assert target != [7, 7]
 
 
-def test_pick_target_skips_construction_in_progress():
+def test_pick_target_prefers_adjacent_construction_in_progress():
     hq = make_plant([7, 6], is_main=True)
     arena = make_arena(
         plantations=[hq],
         construction=[{"position": [7, 7], "progress": 20}],
     )
     target = pick_target(arena, arena.plantations[0])
-    assert target != [7, 7]
+    assert target == [7, 7]
 
 
 def test_pick_target_skips_cells_within_2_of_beaver():
@@ -323,7 +323,7 @@ def test_pick_upgrade_returns_first_in_priority_order():
             {"name": "repair_power", "current": 0, "max": 3},
         ]),
     })
-    assert pick_upgrade(arena) == "repair_power"
+    assert pick_upgrade(arena) == "max_hp"
 
 
 def test_pick_upgrade_skips_maxed_tiers():
@@ -344,9 +344,6 @@ def test_pick_upgrade_returns_empty_when_all_known_maxed():
         "plantationUpgrades": make_upgrades(1, tiers),
     })
     assert pick_upgrade(arena) == ""
-
-
-from cherviak.brain import decide_turn
 
 
 from cherviak.brain import forward_direction
@@ -372,18 +369,20 @@ def test_forward_direction_same_position_returns_zero():
     assert forward_direction([5, 5], [5, 5]) == (0, 0)
 
 
+from cherviak.brain import decide_turn_lateral
+
+
 def test_decide_turn_returns_none_when_no_hq():
     arena = make_arena(plantations=[])
-    assert decide_turn(arena) is None
+    assert decide_turn_lateral(arena) is None
 
 
 def test_decide_turn_returns_build_command_for_normal_state():
     hq = make_plant([5, 5], is_main=True)
     arena = make_arena(plantations=[hq])
-    body = decide_turn(arena)
+    body = decide_turn_lateral(arena)
     assert body is not None
     assert len(body["command"]) >= 1
-    # path goes from HQ to a cardinal neighbor of HQ
     first_cmd = body["command"][0]
     assert first_cmd["path"][0] == [5, 5]
 
@@ -392,7 +391,38 @@ def test_decide_turn_includes_relocate_when_fresh_neighbor_exists():
     hq = make_plant([5, 5], is_main=True, pid="hq")
     fresh = make_plant([5, 6], immunity=4, pid="fresh")
     arena = make_arena(plantations=[hq, fresh])
-    body = decide_turn(arena)
+    body = decide_turn_lateral(arena)
+    assert body["relocateMain"] == [[5, 5], [5, 6]]
+
+
+def test_decide_turn_includes_relocate_when_hq_cell_near_completion():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    neighbor = make_plant([5, 6], pid="neighbor")
+    arena = Arena.model_validate(
+        {
+            "turnNo": 10,
+            "nextTurnIn": 1.0,
+            "size": [100, 100],
+            "actionRange": 2,
+            "plantations": [hq, neighbor],
+            "enemy": [],
+            "mountains": [],
+            "cells": [
+                {"position": [5, 5], "terraformationProgress": 70, "turnsUntilDegradation": 10},
+                {"position": [5, 6], "terraformationProgress": 10, "turnsUntilDegradation": 50},
+            ],
+            "construction": [],
+            "beavers": [],
+            "plantationUpgrades": {
+                "points": 0,
+                "intervalTurns": 30,
+                "turnsUntilPoints": 30,
+                "maxPoints": 15,
+                "tiers": [],
+            },
+        }
+    )
+    body = decide_turn_lateral(arena)
     assert body["relocateMain"] == [[5, 5], [5, 6]]
 
 
@@ -404,12 +434,15 @@ def test_decide_turn_includes_upgrade_when_points_available():
         "plantationUpgrades": {
             "points": 1, "intervalTurns": 30, "turnsUntilPoints": 30,
             "maxPoints": 15,
-            "tiers": [{"name": "repair_power", "current": 0, "max": 3}],
+            "tiers": [
+                {"name": "repair_power", "current": 0, "max": 3},
+                {"name": "settlement_limit", "current": 0, "max": 10},
+            ],
         },
     }
     arena = Arena.model_validate(arena_dict)
-    body = decide_turn(arena)
-    assert body["plantationUpgrade"] == "repair_power"
+    body = decide_turn_lateral(arena)
+    assert body["plantationUpgrade"] == "settlement_limit"
 
 
 def test_decide_turn_returns_none_when_all_blocked_and_no_upgrade():
@@ -418,11 +451,7 @@ def test_decide_turn_returns_none_when_all_blocked_and_no_upgrade():
         plantations=[hq],
         mountains=[[6, 5], [4, 5], [5, 6], [5, 4]],
     )
-    # No build possible, no upgrade points, no fresh neighbor
-    assert decide_turn(arena) is None
-
-
-from cherviak.brain import decide_turn_lateral
+    assert decide_turn_lateral(arena) is None
 
 
 def test_decide_turn_lateral_includes_lateral_command():
@@ -606,6 +635,27 @@ def test_check_relocate_skips_fresh_neighbor_near_beaver():
         },
     })
     assert check_relocate(arena) is None
+
+
+def test_check_relocate_prefers_lowest_progress_neighbor_when_hq_is_risky():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    safer = make_plant([5, 6], pid="safer")
+    riskier = make_plant([6, 5], pid="riskier")
+    arena = Arena.model_validate({
+        "turnNo": 10, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [hq, safer, riskier], "enemy": [], "mountains": [], "construction": [],
+        "beavers": [],
+        "cells": [
+            {"position": [5, 5], "terraformationProgress": 95, "turnsUntilDegradation": 10},
+            {"position": [5, 6], "terraformationProgress": 5, "turnsUntilDegradation": 50},
+            {"position": [6, 5], "terraformationProgress": 40, "turnsUntilDegradation": 40},
+        ],
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+    })
+    assert check_relocate(arena) == [[5, 5], [5, 6]]
 
 
 def test_pick_target_skips_cells_in_storm_path():

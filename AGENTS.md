@@ -36,7 +36,7 @@ STRATEGIES = {
 
 - `scripts/run_session.py` requires `--strategy`. If it is omitted, the script prints the list of available strategies from `STRATEGIES`.
 - When adding a new strategy, keep the registry key equal to `StrategyClass.name` so CLI names stay consistent with metadata written to session artifacts.
-- `lateral` strategy («рыба-червяк»): extends `mvp` with perpendicular side-branches built when a plantation's cell reaches `LATERAL_THRESHOLD` (70%) terraformation. Keeps more plantations alive after cell completion. Logic in `cherviak/brain.py:decide_turn_lateral`.
+- `lateral` strategy («рыба-червяк»): chain-builds plantations from HQ with perpendicular side-branches built when a plantation's cell reaches `LATERAL_THRESHOLD` (70%) terraformation. Keeps more plantations alive after cell completion. Logic in `cherviak/brain.py:decide_turn_lateral`.
 
 ## Notes
 
