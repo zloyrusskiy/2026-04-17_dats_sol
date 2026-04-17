@@ -261,6 +261,29 @@ def test_pick_upgrade_returns_empty_when_all_known_maxed():
 from cherviak.brain import decide_turn
 
 
+from cherviak.brain import forward_direction
+
+
+def test_forward_direction_pure_x():
+    assert forward_direction([5, 5], [8, 5]) == (1, 0)
+    assert forward_direction([5, 5], [2, 5]) == (-1, 0)
+
+
+def test_forward_direction_pure_y():
+    assert forward_direction([5, 5], [5, 9]) == (0, 1)
+    assert forward_direction([5, 5], [5, 1]) == (0, -1)
+
+
+def test_forward_direction_diagonal_returns_x_component():
+    # diagonal червяк — prefer X axis as the "forward" we treat as primary
+    assert forward_direction([5, 5], [8, 8]) == (1, 0)
+    assert forward_direction([5, 5], [2, 2]) == (-1, 0)
+
+
+def test_forward_direction_same_position_returns_zero():
+    assert forward_direction([5, 5], [5, 5]) == (0, 0)
+
+
 def test_decide_turn_returns_none_when_no_hq():
     arena = make_arena(plantations=[])
     assert decide_turn(arena) is None

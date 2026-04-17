@@ -26,6 +26,19 @@ def nearest_bonus_distance(p: Position) -> int:
     return abs(x - bx) + abs(y - by)
 
 
+def forward_direction(hq: Position, p: Position) -> tuple[int, int]:
+    """Unit-vector direction from hq to p. For diagonal, return X-axis component."""
+    dx = p[0] - hq[0]
+    dy = p[1] - hq[1]
+    if dx == 0 and dy == 0:
+        return (0, 0)
+    sx = (dx > 0) - (dx < 0)
+    sy = (dy > 0) - (dy < 0)
+    if sx != 0:
+        return (sx, 0)
+    return (0, sy)
+
+
 def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
     occupied: set[tuple[int, int]] = set()
     for p in arena.plantations:
