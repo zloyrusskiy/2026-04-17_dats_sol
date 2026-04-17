@@ -159,3 +159,42 @@ def test_build_commands_empty_when_no_plantations_in_range():
     target = [50, 50]  # way outside AR
     commands = build_commands(arena, target)
     assert commands == []
+
+
+from cherviak.brain import check_relocate
+
+
+def test_check_relocate_returns_path_when_fresh_neighbor_exists():
+    hq = make_plant([5, 5], is_main=True, immunity=0, pid="hq")
+    # Freshly built: immunityUntilTurn = current_turn + 3 (turn_no=1 here, so >= 3)
+    fresh = make_plant([5, 6], immunity=4, pid="fresh")
+    arena = make_arena(plantations=[hq, fresh])
+
+    result = check_relocate(arena)
+    assert result == [[5, 5], [5, 6]]
+
+
+def test_check_relocate_returns_none_when_no_neighbor_is_fresh():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    old_neighbor = make_plant([5, 6], immunity=0, pid="old")
+    arena = make_arena(plantations=[hq, old_neighbor])
+    assert check_relocate(arena) is None
+
+
+def test_check_relocate_skips_diagonal_neighbors():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    diag = make_plant([6, 6], immunity=4, pid="diag")
+    arena = make_arena(plantations=[hq, diag])
+    assert check_relocate(arena) is None
+
+
+def test_check_relocate_skips_isolated_plantations():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    iso = make_plant([5, 6], immunity=4, is_isolated=True, pid="iso")
+    arena = make_arena(plantations=[hq, iso])
+    assert check_relocate(arena) is None
+
+
+def test_check_relocate_returns_none_when_no_hq():
+    arena = make_arena(plantations=[])
+    assert check_relocate(arena) is None

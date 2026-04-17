@@ -66,3 +66,25 @@ def build_commands(arena: Arena, target: Position) -> list[list[Position]]:
             continue
         paths.append([p.position, p.position, target])
     return paths
+
+
+def check_relocate(arena: Arena) -> Optional[list[Position]]:
+    """If a freshly built plantation is cardinally adjacent to HQ,
+    return [hq.position, fresh.position] for relocateMain. Else None.
+
+    'Freshly built' = immunityUntilTurn - turn_no >= 2 (built this turn,
+    has remaining 3-turn immunity).
+    """
+    hq = next((p for p in arena.plantations if p.is_main), None)
+    if hq is None:
+        return None
+
+    for p in arena.plantations:
+        if p.is_main or p.is_isolated:
+            continue
+        if not is_cardinal_neighbor(p.position, hq.position):
+            continue
+        if p.immunity_until_turn - arena.turn_no < 2:
+            continue
+        return [hq.position, p.position]
+    return None
