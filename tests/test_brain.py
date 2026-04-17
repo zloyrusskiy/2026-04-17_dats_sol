@@ -117,3 +117,45 @@ def test_pick_target_returns_none_when_all_blocked():
     )
     target = pick_target(arena, arena.plantations[0])
     assert target is None
+
+
+from cherviak.brain import build_commands
+
+
+def test_build_commands_includes_plantations_in_action_range():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    near = make_plant([6, 5], pid="near")  # within AR=2 of [7,5]
+    far = make_plant([20, 20], pid="far")  # outside AR=2 of [7,5]
+    arena = make_arena(plantations=[hq, near, far])
+    target = [7, 5]
+
+    commands = build_commands(arena, target)
+    builder_positions = sorted([c[0] for c in commands])
+    assert builder_positions == sorted([[5, 5], [6, 5]])
+
+
+def test_build_commands_uses_author_as_relay_to_avoid_penalty():
+    hq = make_plant([5, 5], is_main=True)
+    arena = make_arena(plantations=[hq])
+    target = [6, 5]
+    commands = build_commands(arena, target)
+    # path is [author, author, target]
+    assert commands == [[[5, 5], [5, 5], [6, 5]]]
+
+
+def test_build_commands_excludes_isolated_plantations():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    isolated = make_plant([6, 5], is_isolated=True, pid="iso")
+    arena = make_arena(plantations=[hq, isolated])
+    target = [7, 5]
+    commands = build_commands(arena, target)
+    builders = [c[0] for c in commands]
+    assert [6, 5] not in builders
+
+
+def test_build_commands_empty_when_no_plantations_in_range():
+    hq = make_plant([0, 0], is_main=True)
+    arena = make_arena(plantations=[hq])
+    target = [50, 50]  # way outside AR
+    commands = build_commands(arena, target)
+    assert commands == []

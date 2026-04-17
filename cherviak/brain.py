@@ -50,3 +50,19 @@ def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
     if not safe:
         return None
     return min(safe, key=nearest_bonus_distance)
+
+
+def build_commands(arena: Arena, target: Position) -> list[list[Position]]:
+    """Return list of paths [author, author, target] for every controllable
+    plantation within action_range of the target."""
+    AR = arena.action_range
+    paths: list[list[Position]] = []
+    for p in arena.plantations:
+        if p.is_isolated:
+            continue
+        if abs(p.position[0] - target[0]) > AR:
+            continue
+        if abs(p.position[1] - target[1]) > AR:
+            continue
+        paths.append([p.position, p.position, target])
+    return paths
