@@ -53,6 +53,20 @@ def hazardous_positions(arena: Arena, lookahead: int = STORM_LOOKAHEAD) -> set[t
     return haz
 
 
+def is_hazardous(
+    pos: Position,
+    hazardous: set[tuple[int, int]],
+    beavers,
+    beaver_buffer: int = 3,
+) -> bool:
+    if (pos[0], pos[1]) in hazardous:
+        return True
+    for b in beavers:
+        if chebyshev(pos, b.position) <= beaver_buffer:
+            return True
+    return False
+
+
 def forward_direction(hq: Position, p: Position) -> tuple[int, int]:
     """Unit-vector direction from hq to p. For diagonal, return X-axis component."""
     dx = p[0] - hq[0]

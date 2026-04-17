@@ -552,3 +552,22 @@ def test_hazardous_positions_moving_storm_with_radius_marks_swept_band():
     assert (8, 5) in haz  # right edge of t=2 radius
     assert (4, 5) in haz  # left edge of t=0 radius
     assert (9, 5) not in haz
+
+
+from cherviak.brain import is_hazardous
+from cherviak.models import Beaver
+
+
+def test_is_hazardous_true_when_in_hazard_set():
+    assert is_hazardous([5, 5], {(5, 5)}, []) is True
+
+
+def test_is_hazardous_true_when_within_beaver_buffer():
+    b = Beaver.model_validate({"id": "b1", "position": [10, 10], "hp": 100})
+    assert is_hazardous([12, 11], set(), [b], beaver_buffer=3) is True
+    assert is_hazardous([13, 13], set(), [b], beaver_buffer=3) is True
+
+
+def test_is_hazardous_false_outside_buffer_and_hazards():
+    b = Beaver.model_validate({"id": "b1", "position": [0, 0], "hp": 100})
+    assert is_hazardous([10, 10], {(99, 99)}, [b], beaver_buffer=3) is False
