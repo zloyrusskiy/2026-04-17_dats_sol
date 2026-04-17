@@ -5,7 +5,7 @@ from cherviak.models import Arena
 
 
 class GameClient:
-    def __init__(self, config: Config, timeout: float = 2.0):
+    def __init__(self, config: Config, timeout: float = 0.5):
         self._client = httpx.Client(
             base_url=config.base_url,
             headers={"X-Auth-Token": config.token},
