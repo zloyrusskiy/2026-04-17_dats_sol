@@ -109,6 +109,13 @@ def test_pick_target_skips_cells_within_2_of_beaver():
     assert target != [7, 7]
 
 
+def test_pick_target_skips_out_of_bounds_positions():
+    hq = make_plant([0, 7], is_main=True)
+    arena = make_arena(plantations=[hq], mountains=[[1, 7]])
+    target = pick_target(arena, arena.plantations[0])
+    assert target != [-1, 7]
+
+
 def test_pick_target_returns_none_when_all_blocked():
     hq = make_plant([5, 5], is_main=True)
     arena = make_arena(

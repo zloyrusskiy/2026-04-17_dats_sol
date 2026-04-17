@@ -38,6 +38,8 @@ def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
     beaver_positions = [b.position for b in arena.beavers]
 
     def is_safe(c: Position) -> bool:
+        if c[0] < 0 or c[1] < 0 or c[0] >= arena.size[0] or c[1] >= arena.size[1]:
+            return False
         ct = (c[0], c[1])
         if ct in occupied or ct in mountains:
             return False
