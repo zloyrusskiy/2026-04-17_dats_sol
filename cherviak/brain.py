@@ -83,6 +83,62 @@ def build_commands(arena: Arena, target: Position) -> list[list[Position]]:
     return paths
 
 
+LATERAL_THRESHOLD = 70
+
+
+def lateral_targets(arena: Arena) -> list[tuple[Plantation, Position]]:
+    """For each plantation whose cell is near completion, suggest a perpendicular
+    side-build to keep a survivor after the cell completes."""
+    hq = next((p for p in arena.plantations if p.is_main), None)
+    if hq is None:
+        return []
+
+    cell_by_pos = {tuple(c.position): c for c in arena.cells}
+
+    occupied: set[tuple[int, int]] = set()
+    for p in arena.plantations:
+        occupied.add(tuple(p.position))
+    for e in arena.enemy:
+        occupied.add(tuple(e.position))
+    for c in arena.construction:
+        occupied.add(tuple(c.position))
+    mountains = {tuple(m) for m in arena.mountains}
+    beaver_positions = [b.position for b in arena.beavers]
+
+    def is_safe(c: Position) -> bool:
+        if c[0] < 0 or c[1] < 0 or c[0] >= arena.size[0] or c[1] >= arena.size[1]:
+            return False
+        ct = (c[0], c[1])
+        if ct in occupied or ct in mountains:
+            return False
+        for bp in beaver_positions:
+            if chebyshev(c, bp) <= 2:
+                return False
+        return True
+
+    out: list[tuple[Plantation, Position]] = []
+    for p in arena.plantations:
+        if p.is_main or p.is_isolated:
+            continue
+        cell = cell_by_pos.get(tuple(p.position))
+        if cell is None:
+            continue
+        if cell.terraformation_progress < LATERAL_THRESHOLD:
+            continue
+        fx, fy = forward_direction(hq.position, p.position)
+        if fx == 0 and fy == 0:
+            continue
+        if fx != 0:
+            cands = [[p.position[0], p.position[1] + 1], [p.position[0], p.position[1] - 1]]
+        else:
+            cands = [[p.position[0] + 1, p.position[1]], [p.position[0] - 1, p.position[1]]]
+        safe = [c for c in cands if is_safe(c)]
+        if not safe:
+            continue
+        out.append((p, min(safe, key=nearest_bonus_distance)))
+    return out
+
+
 def check_relocate(arena: Arena) -> Optional[list[Position]]:
     """If a freshly built plantation is cardinally adjacent to HQ,
     return [hq.position, fresh.position] for relocateMain. Else None.

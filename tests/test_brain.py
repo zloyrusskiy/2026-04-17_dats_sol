@@ -168,6 +168,94 @@ def test_build_commands_empty_when_no_plantations_in_range():
     assert commands == []
 
 
+from cherviak.brain import LATERAL_THRESHOLD, lateral_targets
+
+
+def make_cell(pos, progress=0, ttd=80):
+    return {"position": pos, "terraformationProgress": progress,
+            "turnsUntilDegradation": ttd}
+
+
+def test_lateral_targets_skips_below_threshold():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([7, 5], pid="r1")
+    arena = make_arena(
+        plantations=[hq, rib_parent],
+    )
+    # inject cell with low progress
+    arena.cells.append(__import__("cherviak.models", fromlist=["Cell"]).Cell.model_validate(
+        make_cell([7, 5], progress=LATERAL_THRESHOLD - 1)))
+    assert lateral_targets(arena) == []
+
+
+def test_lateral_targets_picks_perpendicular_when_threshold_reached():
+    from cherviak.models import Cell
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([7, 5], pid="r1")  # forward = (+1, 0) so perpendicular = Y axis
+    arena = make_arena(plantations=[hq, rib_parent])
+    arena.cells.append(Cell.model_validate(make_cell([7, 5], progress=LATERAL_THRESHOLD)))
+
+    result = lateral_targets(arena)
+    assert len(result) == 1
+    builder, target = result[0]
+    assert builder.id == "r1"
+    assert target in ([7, 6], [7, 4])  # perpendicular to forward X
+
+
+def test_lateral_targets_skips_hq():
+    from cherviak.models import Cell
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    arena = make_arena(plantations=[hq])
+    arena.cells.append(Cell.model_validate(make_cell([5, 5], progress=99)))
+    assert lateral_targets(arena) == []
+
+
+def test_lateral_targets_skips_isolated():
+    from cherviak.models import Cell
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    iso = make_plant([7, 5], is_isolated=True, pid="iso")
+    arena = make_arena(plantations=[hq, iso])
+    arena.cells.append(Cell.model_validate(make_cell([7, 5], progress=99)))
+    assert lateral_targets(arena) == []
+
+
+def test_lateral_targets_filters_unsafe_candidates():
+    from cherviak.models import Cell
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([7, 5], pid="r1")
+    # block one perpendicular with mountain, the other with another plantation
+    blocker = make_plant([7, 4], pid="b")
+    arena = make_arena(
+        plantations=[hq, rib_parent, blocker],
+        mountains=[[7, 6]],
+    )
+    arena.cells.append(Cell.model_validate(make_cell([7, 5], progress=80)))
+    assert lateral_targets(arena) == []
+
+
+def test_lateral_targets_skips_when_no_cell_data():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([7, 5], pid="r1")
+    arena = make_arena(plantations=[hq, rib_parent])
+    # no cell entry for [7,5]
+    assert lateral_targets(arena) == []
+
+
+def test_lateral_targets_picks_bonus_neighbor_when_two_safe():
+    from cherviak.models import Cell
+    # forward axis Y so perpendiculars are X. [7, 6] is closer to bonus [7,7].
+    hq = make_plant([7, 4], is_main=True, pid="hq")
+    rib_parent = make_plant([7, 6], pid="r1")  # forward (0, +1), perpendiculars X
+    arena = make_arena(plantations=[hq, rib_parent])
+    arena.cells.append(Cell.model_validate(make_cell([7, 6], progress=80)))
+    result = lateral_targets(arena)
+    assert len(result) == 1
+    _, target = result[0]
+    # candidates: [8,6] dist to nearest bonus [7,7]=1+1=2; [6,6] dist to [7,7]=1+1=2 — tie
+    # both equally good — accept either
+    assert target in ([8, 6], [6, 6])
+
+
 from cherviak.brain import check_relocate
 
 
