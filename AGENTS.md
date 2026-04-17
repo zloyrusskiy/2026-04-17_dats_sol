@@ -1,6 +1,8 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance for Claude Code and similar coding agents working in this repository.
+
+`CLAUDE.md` must be a symbolic link to `AGENTS.md`. These filenames refer to the same guideline document and must never diverge.
 
 ## Project
 
@@ -9,43 +11,34 @@ DatsSol hackathon game bot — a Python client for a turn-based strategy game wh
 ## Commands
 
 ```bash
-source venv/bin/activate    # activate virtualenv
-python main.py              # run the bot
+source venv/bin/activate
+venv/bin/python main.py
+venv/bin/python scripts/run_session.py --strategy passive
 ```
 
-Python virtualenv is at `venv/`. Always use `venv/bin/python` (not system Python) when running scripts or installing packages.
+Python virtualenv is at `venv/`. Always use `venv/bin/python` when running scripts or installing packages.
 
-No build system, test framework, or linter configured yet.
+## Strategies
 
-## Game API
+- Strategy implementations live in `cherviak/strategies/`.
+- Each strategy should expose a stable `name` field and the same runner-facing methods used by `PassiveStrategy`: `on_round_started()`, `decide_turn(arena)`, and `on_turn_result(arena, command, response)`.
+- Put each strategy in its own module under `cherviak/strategies/`. Shared primitives such as base state/dataclasses should also live in that package.
+- To make a strategy available in `scripts/run_session.py`, import the class there and add it to the `STRATEGIES` registry:
 
-- **Test server:** `https://games-test.datsteam.dev`
-- **Prod server:** `https://games.datsteam.dev`
-- Auth header: `X-Auth-Token: <token>`
-- `GET /api/arena` — world state (plantations, enemies, map, meteo, upgrades)
-- `POST /api/command` — send actions (build/repair/sabotage/attack + upgrades + relocate HQ)
-- `GET /api/logs` — player event logs
+```python
+from cherviak.strategies import MyStrategy
 
-Coordinates are `[x, y]` arrays. Command paths are `[[author], [relay], [target]]`.
+STRATEGIES = {
+    PassiveStrategy.name: PassiveStrategy,
+    MyStrategy.name: MyStrategy,
+}
+```
 
-## Key Game Mechanics (affects bot design)
+- `scripts/run_session.py` requires `--strategy`. If it is omitted, the script prints the list of available strategies from `STRATEGIES`.
+- When adding a new strategy, keep the registry key equal to `StrategyClass.name` so CLI names stay consistent with metadata written to session artifacts.
 
-- **Turn duration:** 1 second — bot must fetch state, decide, and submit within this window
-- **Round:** 600 turns, progress resets between rounds, points accumulate across rounds
-- **HQ (ЦУ):** losing it destroys all plantations + 5% score penalty; protect at all costs
-- **Adjacency:** plantations must form unbroken cardinal (non-diagonal) chain from HQ to be controllable
-- **Relay penalty:** each additional command routed through the same relay plantation loses 1 effectiveness (CS/RS/SE/BE), down to 0
-- **Radii are squares:** |ΔX| ≤ R and |ΔY| ≤ R (Chebyshev distance), not circles
-- **Bonus cells:** where both X and Y are divisible by 7 yield 1.5x points (1500 max vs 1000)
-- **Cell completion:** plantation disappears when cell reaches 100% terraform; cell degrades after 80 turns at 10%/turn
-- **Construction:** building HP threshold is always 50 (not affected by MHP upgrades); new plantation gets 3-turn immunity
-- **Plant limit overflow:** building beyond limit auto-destroys oldest plantation (can destroy HQ!)
-- **Beavers:** 100 HP, regen 5/turn, deal 15 HP damage in radius 2, killing one yields 10x cell points
+## Notes
 
-## Server Processing Order (per turn)
-
-1. Upgrades → 2. Repair/Build → 3. Sabotage → 4. Beaver attack (player→beaver) → 5. HQ relocate → 6. Beaver attack (beaver→player) → 7. Lost plantation degradation → 8. Idle construction damage → 9. Terraform + scoring → 10. Respawn → 11. Natural disasters
-
-## Language
-
-Game documentation and code comments are in Russian. Bot code can be in English or Russian.
+- Turn duration is 1 second, so strategy code should stay lightweight.
+- Losing HQ destroys all plantations and causes a score penalty, so any aggressive strategy still needs HQ safety checks.
+- Radii are square/Chebyshev-based, not circular.

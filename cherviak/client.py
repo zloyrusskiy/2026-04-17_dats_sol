@@ -34,6 +34,20 @@ class GameClient:
         r.raise_for_status()
         return r.json()
 
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(0.1),
+        retry=retry_if_exception_type(httpx.HTTPError),
+        reraise=True,
+    )
+    def get_logs(self) -> list[dict]:
+        r = self._client.get("/api/logs")
+        r.raise_for_status()
+        payload = r.json()
+        if not isinstance(payload, list):
+            raise httpx.HTTPError(f"Unexpected logs payload: {payload!r}")
+        return payload
+
     def close(self) -> None:
         self._client.close()
 

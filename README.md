@@ -28,35 +28,69 @@ cp .env.example .env
 venv/bin/python main.py
 ```
 
-## Получение карты и визуализация
+## Web Viewer для сессий
 
-Скрипт [scripts/get_map.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/get_map.py:1) делает запрос к `GET /api/arena`, сохраняет snapshot в JSON и рендерит SVG-карту.
+Скрипт [scripts/session_viewer.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/session_viewer.py:1) поднимает локальный HTTP-сервер и показывает записанные игровые сессии из `artifacts/sessions`.
 
 Базовый запуск:
 
 ```bash
-venv/bin/python scripts/get_map.py
+venv/bin/python scripts/session_viewer.py
 ```
 
-Что получится:
-- `artifacts/map/arena_turn_<N>.json` — сырой ответ API
-- `artifacts/map/arena_turn_<N>.svg` — визуализация карты
+После запуска открой:
+
+```text
+http://127.0.0.1:8765
+```
 
 Полезные опции:
 
 ```bash
-venv/bin/python scripts/get_map.py --base-url https://games.datsteam.dev
-venv/bin/python scripts/get_map.py --output-dir /tmp/dats_sol_map
-venv/bin/python scripts/get_map.py --cell-size 24
-venv/bin/python scripts/get_map.py --input-json /path/to/arena.json
+venv/bin/python scripts/session_viewer.py --host 0.0.0.0 --port 9000
+venv/bin/python scripts/session_viewer.py --sessions-dir /tmp/dats_sol_sessions
+venv/bin/python scripts/session_viewer.py --cell-size 24
 ```
 
-В SVG отмечаются:
-- горы
-- бонусные клетки (`x % 7 == 0` и `y % 7 == 0`)
-- свои плантации и ЦУ
-- вражеские плантации
-- стройки
-- бобры
-- прогресс терраформированных клеток
-- прогноз катаклизмов в легенде справа
+В интерфейсе доступны:
+- список всех записанных сессий
+- покадровое переключение ходов
+- autoplay
+- zoom in/out и fit
+- drag/pan мышью
+- логи, привязанные к конкретному ходу
+- `decision/response` для каждого кадра
+
+## Recorder с пустой стратегией
+
+Скрипт [scripts/run_session.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/run_session.py:1) запускает session recorder. Для запуска нужно явно выбрать стратегию через `--strategy`; сейчас доступна [PassiveStrategy](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/cherviak/strategies/passive.py:1), которая не отправляет команд и просто пишет историю арены и логов по активным раундам.
+
+Примеры:
+
+```bash
+venv/bin/python scripts/run_session.py --strategy passive
+venv/bin/python scripts/run_session.py --strategy passive --logs-interval 3
+venv/bin/python scripts/run_session.py --strategy passive --submit
+```
+
+Что пишет:
+- `artifacts/sessions/<session_id>/meta.json`
+- `artifacts/sessions/<session_id>/turns.jsonl`
+- `artifacts/sessions/<session_id>/logs.jsonl`
+
+## Анализ игровых логов
+
+Скрипт [scripts/analyze_logs.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/analyze_logs.py:1) делает запрос к `GET /api/logs` или читает локальный JSON с логами, после чего строит короткую сводку:
+
+- сколько и каких событий было
+- что по логам похоже на состояние ЦУ
+- какие апгрейды встречались
+- последние важные события
+
+Примеры:
+
+```bash
+venv/bin/python scripts/analyze_logs.py
+venv/bin/python scripts/analyze_logs.py --save-raw
+venv/bin/python scripts/analyze_logs.py --input-json artifacts/logs/player_logs_20260417_120000.json
+```
