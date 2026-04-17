@@ -20,13 +20,14 @@ if str(ROOT_DIR) not in sys.path:
 
 from cherviak.client import GameClient
 from cherviak.config import load_config
-from cherviak.strategies import MvpStrategy, PassiveStrategy
+from cherviak.strategies import LateralStrategy, MvpStrategy, PassiveStrategy
 
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/sessions")
 STRATEGIES = {
     PassiveStrategy.name: PassiveStrategy,
     MvpStrategy.name: MvpStrategy,
+    LateralStrategy.name: LateralStrategy,
 }
 
 
