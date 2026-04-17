@@ -249,3 +249,56 @@ def test_pick_upgrade_returns_empty_when_all_known_maxed():
         "plantationUpgrades": make_upgrades(1, tiers),
     })
     assert pick_upgrade(arena) == ""
+
+
+from cherviak.brain import decide_turn
+
+
+def test_decide_turn_returns_none_when_no_hq():
+    arena = make_arena(plantations=[])
+    assert decide_turn(arena) is None
+
+
+def test_decide_turn_returns_build_command_for_normal_state():
+    hq = make_plant([5, 5], is_main=True)
+    arena = make_arena(plantations=[hq])
+    body = decide_turn(arena)
+    assert body is not None
+    assert len(body["command"]) >= 1
+    # path goes from HQ to a cardinal neighbor of HQ
+    first_cmd = body["command"][0]
+    assert first_cmd["path"][0] == [5, 5]
+
+
+def test_decide_turn_includes_relocate_when_fresh_neighbor_exists():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    fresh = make_plant([5, 6], immunity=4, pid="fresh")
+    arena = make_arena(plantations=[hq, fresh])
+    body = decide_turn(arena)
+    assert body["relocateMain"] == [[5, 5], [5, 6]]
+
+
+def test_decide_turn_includes_upgrade_when_points_available():
+    arena_dict = {
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [make_plant([5, 5], is_main=True)],
+        "enemy": [], "mountains": [], "cells": [], "construction": [], "beavers": [],
+        "plantationUpgrades": {
+            "points": 1, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15,
+            "tiers": [{"name": "repair_power", "current": 0, "max": 3}],
+        },
+    }
+    arena = Arena.model_validate(arena_dict)
+    body = decide_turn(arena)
+    assert body["plantationUpgrade"] == "repair_power"
+
+
+def test_decide_turn_returns_none_when_all_blocked_and_no_upgrade():
+    hq = make_plant([5, 5], is_main=True)
+    arena = make_arena(
+        plantations=[hq],
+        mountains=[[6, 5], [4, 5], [5, 6], [5, 4]],
+    )
+    # No build possible, no upgrade points, no fresh neighbor
+    assert decide_turn(arena) is None

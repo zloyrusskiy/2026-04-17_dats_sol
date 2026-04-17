@@ -111,3 +111,31 @@ def pick_upgrade(arena: Arena) -> str:
         if tier is not None and tier.current < tier.max:
             return name
     return ""
+
+
+def decide_turn(arena: Arena) -> Optional[dict]:
+    """Compose all decisions into a request body. Returns None if there is
+    nothing useful to send (server requires at least one of command/upgrade/
+    relocateMain)."""
+    hq = next((p for p in arena.plantations if p.is_main), None)
+    if hq is None:
+        return None
+
+    target = pick_target(arena, hq)
+    commands: list[list[Position]] = []
+    if target is not None:
+        commands = build_commands(arena, target)
+
+    relocate = check_relocate(arena)
+    upgrade = pick_upgrade(arena)
+
+    if not commands and not relocate and not upgrade:
+        return None
+
+    body: dict = {
+        "command": [{"path": c} for c in commands],
+        "plantationUpgrade": upgrade,
+    }
+    if relocate is not None:
+        body["relocateMain"] = relocate
+    return body
