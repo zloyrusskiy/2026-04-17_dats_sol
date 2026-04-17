@@ -34,7 +34,6 @@ class GameClient:
         config: Config,
         timeout: float = 0.5,
         log_requests: bool = False,
-        min_request_interval: float = 0.35,
     ):
         self._client = httpx.Client(
             base_url=config.base_url,
@@ -42,8 +41,6 @@ class GameClient:
             timeout=timeout,
         )
         self._log_requests = log_requests
-        self._min_request_interval = max(min_request_interval, 0.0)
-        self._last_request_started_at: float | None = None
 
     def _timestamp(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
@@ -111,14 +108,8 @@ class GameClient:
         json_body: dict | None = None,
         response_details: Callable[[httpx.Response], str | None] | None = None,
     ) -> httpx.Response:
-        if self._last_request_started_at is not None and self._min_request_interval > 0:
-            elapsed = time.monotonic() - self._last_request_started_at
-            remaining = self._min_request_interval - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
         self._log_request_start(method, path, json_body)
         started_at = time.perf_counter()
-        self._last_request_started_at = time.monotonic()
         try:
             response = self._client.request(method, path, json=json_body)
             details = None
@@ -151,7 +142,10 @@ class GameClient:
         r = self._request(
             "GET",
             "/api/arena",
-            response_details=lambda response: f"turnNo={response.json().get('turnNo')}",
+            response_details=lambda response: (
+                f"turnNo={response.json().get('turnNo')} "
+                f"nextTurnIn={response.json().get('nextTurnIn')}"
+            ),
         )
         r.raise_for_status()
         return Arena.model_validate(r.json())

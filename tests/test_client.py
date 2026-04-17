@@ -29,32 +29,6 @@ def test_not_retryable_for_other_client_errors():
     assert _is_retryable_http_error(make_status_error(400)) is False
 
 
-def test_request_spacing_respects_min_request_interval(monkeypatch: pytest.MonkeyPatch):
-    monotonic_values = iter([0.0, 0.1, 0.35])
-    sleep_calls: list[float] = []
-
-    monkeypatch.setattr("cherviak.client.time.monotonic", lambda: next(monotonic_values))
-    monkeypatch.setattr("cherviak.client.time.sleep", lambda seconds: sleep_calls.append(seconds))
-
-    client = GameClient(
-        Config(token="token", base_url="https://example.test"),
-        min_request_interval=0.35,
-    )
-    monkeypatch.setattr(
-        client._client,
-        "request",
-        lambda method, path, json=None: httpx.Response(
-            200,
-            request=httpx.Request(method, f"https://example.test{path}"),
-        ),
-    )
-
-    client._request("GET", "/api/arena")
-    client._request("GET", "/api/logs")
-
-    assert sleep_calls == [pytest.approx(0.25)]
-
-
 def test_timestamp_uses_milliseconds_without_timezone():
     client = GameClient(Config(token="token", base_url="https://example.test"))
 
