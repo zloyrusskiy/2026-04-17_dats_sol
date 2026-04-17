@@ -55,9 +55,11 @@ def test_is_cardinal_neighbor():
 
 
 def test_nearest_bonus_distance():
-    assert nearest_bonus_distance([7, 7]) == 0
-    assert nearest_bonus_distance([8, 7]) == 1
-    assert nearest_bonus_distance([10, 10]) == 4 + 4  # to [7,7] or [14,14]; min is to [7,7]
+    assert nearest_bonus_distance([7, 7]) == 0          # on bonus
+    assert nearest_bonus_distance([8, 7]) == 1          # one cell away
+    assert nearest_bonus_distance([10, 10]) == 6        # nearest is [7,7]: 3+3
+    assert nearest_bonus_distance([11, 11]) == 6        # nearest is [14,14]: 3+3
+    assert nearest_bonus_distance([14, 14]) == 0        # on bonus
 
 
 def test_pick_target_chooses_neighbor_closest_to_bonus():

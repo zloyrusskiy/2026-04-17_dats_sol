@@ -21,23 +21,8 @@ def is_cardinal_neighbor(a: Position, b: Position) -> bool:
 
 def nearest_bonus_distance(p: Position) -> int:
     x, y = p
-    x_mod = x % 7
-    y_mod = y % 7
-
-    # If close to bonus boundary (within 1 cell), target nearest bonus
-    # Otherwise, target next bonus cell
-    x_outer = x_mod <= 1 or x_mod >= 6
-    y_outer = y_mod <= 1 or y_mod >= 6
-
-    if x_outer and y_outer:
-        # Near bonus - distance to nearest
-        bx = round(x / 7) * 7
-        by = round(y / 7) * 7
-    else:
-        # In middle - distance to next bonus
-        bx = ((x // 7) + 1) * 7
-        by = ((y // 7) + 1) * 7
-
+    bx = round(x / 7) * 7
+    by = round(y / 7) * 7
     return abs(x - bx) + abs(y - by)
 
 
