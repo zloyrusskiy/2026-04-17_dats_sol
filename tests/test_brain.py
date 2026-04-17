@@ -571,3 +571,38 @@ def test_is_hazardous_true_when_within_beaver_buffer():
 def test_is_hazardous_false_outside_buffer_and_hazards():
     b = Beaver.model_validate({"id": "b1", "position": [0, 0], "hp": 100})
     assert is_hazardous([10, 10], {(99, 99)}, [b], beaver_buffer=3) is False
+
+
+def test_check_relocate_skips_fresh_neighbor_in_storm():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    fresh = make_plant([5, 6], immunity=4, pid="fresh")
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [hq, fresh], "enemy": [], "mountains": [], "cells": [],
+        "construction": [], "beavers": [],
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+        "meteoForecasts": [
+            {"kind": "sandstorm", "id": "m1", "forming": False,
+             "position": [5, 6], "radius": 0, "turnsUntil": 1},
+        ],
+    })
+    assert check_relocate(arena) is None
+
+
+def test_check_relocate_skips_fresh_neighbor_near_beaver():
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    fresh = make_plant([5, 6], immunity=4, pid="fresh")
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [hq, fresh], "enemy": [], "mountains": [], "cells": [],
+        "construction": [],
+        "beavers": [{"id": "b1", "position": [7, 7], "hp": 100}],  # cheb([5,6],[7,7])=2 ≤ 3
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+    })
+    assert check_relocate(arena) is None

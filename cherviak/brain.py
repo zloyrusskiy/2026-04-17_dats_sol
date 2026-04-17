@@ -191,12 +191,15 @@ def check_relocate(arena: Arena) -> Optional[list[Position]]:
     if hq is None:
         return None
 
+    haz = hazardous_positions(arena)
     for p in arena.plantations:
         if p.is_main or p.is_isolated:
             continue
         if not is_cardinal_neighbor(p.position, hq.position):
             continue
         if p.immunity_until_turn - arena.turn_no < 2:
+            continue
+        if is_hazardous(p.position, haz, arena.beavers, beaver_buffer=3):
             continue
         return [hq.position, p.position]
     return None
