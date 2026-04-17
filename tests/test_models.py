@@ -99,3 +99,32 @@ def test_arena_handles_missing_optional_lists():
     assert arena.plantations == []
     assert arena.beavers == []
     assert arena.meteo_forecasts == []
+
+
+def test_meteo_sandstorm_moving_omits_turns_until():
+    """Server omits turnsUntil for moving sandstorms — turns_until must be Optional."""
+    minimal = {
+        "turnNo": 1,
+        "nextTurnIn": 1.0,
+        "size": [100, 100],
+        "actionRange": 2,
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+        "meteoForecasts": [
+            {
+                "kind": "sandstorm",
+                "id": "s1",
+                "forming": False,
+                "position": [50, 50],
+                "nextPosition": [51, 51],
+                "radius": 10,
+            }
+        ],
+    }
+    arena = Arena.model_validate(minimal)
+    storm = arena.meteo_forecasts[0]
+    assert storm.kind == "sandstorm"
+    assert storm.turns_until is None
+    assert storm.position == [50, 50]

@@ -53,7 +53,7 @@ class PlantationUpgrades(BaseModel):
 
 class MeteoForecast(BaseModel):
     kind: str
-    turns_until: int = Field(alias="turnsUntil")
+    turns_until: Optional[int] = Field(default=None, alias="turnsUntil")
     id: Optional[str] = None
     forming: Optional[bool] = None
     position: Optional[Position] = None
