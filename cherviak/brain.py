@@ -88,3 +88,26 @@ def check_relocate(arena: Arena) -> Optional[list[Position]]:
             continue
         return [hq.position, p.position]
     return None
+
+
+UPGRADE_ORDER = [
+    "repair_power",
+    "signal_range",
+    "settlement_limit",
+    "decay_mitigation",
+    "max_hp",
+    "vision_range",
+    "earthquake_mitigation",
+    "beaver_damage_mitigation",
+]
+
+
+def pick_upgrade(arena: Arena) -> str:
+    if arena.plantation_upgrades.points < 1:
+        return ""
+    by_name = {t.name: t for t in arena.plantation_upgrades.tiers}
+    for name in UPGRADE_ORDER:
+        tier = by_name.get(name)
+        if tier is not None and tier.current < tier.max:
+            return name
+    return ""

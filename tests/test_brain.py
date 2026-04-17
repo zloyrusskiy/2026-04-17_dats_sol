@@ -198,3 +198,54 @@ def test_check_relocate_skips_isolated_plantations():
 def test_check_relocate_returns_none_when_no_hq():
     arena = make_arena(plantations=[])
     assert check_relocate(arena) is None
+
+
+from cherviak.brain import UPGRADE_ORDER, pick_upgrade
+
+
+def make_upgrades(points: int, tiers: list[dict]) -> dict:
+    return {
+        "points": points, "intervalTurns": 30, "turnsUntilPoints": 30,
+        "maxPoints": 15, "tiers": tiers,
+    }
+
+
+def test_pick_upgrade_returns_empty_when_no_points():
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantationUpgrades": make_upgrades(0, [
+            {"name": "repair_power", "current": 0, "max": 3},
+        ]),
+    })
+    assert pick_upgrade(arena) == ""
+
+
+def test_pick_upgrade_returns_first_in_priority_order():
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantationUpgrades": make_upgrades(1, [
+            {"name": "max_hp", "current": 0, "max": 5},
+            {"name": "repair_power", "current": 0, "max": 3},
+        ]),
+    })
+    assert pick_upgrade(arena) == "repair_power"
+
+
+def test_pick_upgrade_skips_maxed_tiers():
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantationUpgrades": make_upgrades(1, [
+            {"name": "repair_power", "current": 3, "max": 3},  # maxed
+            {"name": "signal_range", "current": 0, "max": 5},
+        ]),
+    })
+    assert pick_upgrade(arena) == "signal_range"
+
+
+def test_pick_upgrade_returns_empty_when_all_known_maxed():
+    tiers = [{"name": name, "current": 99, "max": 99} for name in UPGRADE_ORDER]
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantationUpgrades": make_upgrades(1, tiers),
+    })
+    assert pick_upgrade(arena) == ""
