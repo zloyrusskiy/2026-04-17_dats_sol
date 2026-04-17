@@ -420,3 +420,50 @@ def test_decide_turn_returns_none_when_all_blocked_and_no_upgrade():
     )
     # No build possible, no upgrade points, no fresh neighbor
     assert decide_turn(arena) is None
+
+
+from cherviak.brain import decide_turn_lateral
+
+
+def test_decide_turn_lateral_includes_lateral_command():
+    from cherviak.models import Cell
+    # rib_parent at [9,5] is OUT of AR=2 of any HQ-neighbor forward target
+    # (closest is [6,5], dx=3 > 2), so it's not consumed by the forward command
+    # and the lateral build appears.
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([9, 5], pid="r1")
+    arena = make_arena(plantations=[hq, rib_parent])
+    arena.cells.append(Cell.model_validate(make_cell([9, 5], progress=80)))
+
+    body = decide_turn_lateral(arena)
+    assert body is not None
+    paths = [c["path"] for c in body["command"]]
+    lateral_paths = [
+        p for p in paths
+        if p[0] == [9, 5] and p[2] in ([9, 6], [9, 4])
+    ]
+    assert len(lateral_paths) >= 1
+
+
+def test_decide_turn_lateral_does_not_double_command_same_builder():
+    # rib_parent is in AR of forward target AND has lateral. Only one command.
+    from cherviak.models import Cell
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([6, 5], pid="r1")  # forward (+1,0), in AR of [7,5]
+    arena = make_arena(plantations=[hq, rib_parent])
+    arena.cells.append(Cell.model_validate(make_cell([6, 5], progress=80)))
+
+    body = decide_turn_lateral(arena)
+    assert body is not None
+    builders = [c["path"][0] for c in body["command"]]
+    # rib_parent appears exactly once across all commands
+    assert builders.count([6, 5]) == 1
+
+
+def test_decide_turn_lateral_returns_none_when_nothing_to_do():
+    hq = make_plant([5, 5], is_main=True)
+    arena = make_arena(
+        plantations=[hq],
+        mountains=[[6, 5], [4, 5], [5, 6], [5, 4]],
+    )
+    assert decide_turn_lateral(arena) is None

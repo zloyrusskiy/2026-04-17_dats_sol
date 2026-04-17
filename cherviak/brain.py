@@ -210,3 +210,43 @@ def decide_turn(arena: Arena) -> Optional[dict]:
     if relocate is not None:
         body["relocateMain"] = relocate
     return body
+
+
+def decide_turn_lateral(arena: Arena) -> Optional[dict]:
+    """Composer that extends decide_turn with lateral-branch builds."""
+    hq = next((p for p in arena.plantations if p.is_main), None)
+    if hq is None:
+        return None
+
+    target = pick_target(arena, hq)
+    commands: list[list[Position]] = []
+    if target is not None:
+        commands = build_commands(arena, target)
+
+    used_builders: set[tuple[int, int]] = {tuple(c[0]) for c in commands}
+    used_targets: set[tuple[int, int]] = {tuple(c[2]) for c in commands}
+
+    for builder, lat_target in lateral_targets(arena):
+        bp = (builder.position[0], builder.position[1])
+        tp = (lat_target[0], lat_target[1])
+        if bp in used_builders:
+            continue
+        if tp in used_targets:
+            continue
+        commands.append([builder.position, builder.position, lat_target])
+        used_builders.add(bp)
+        used_targets.add(tp)
+
+    relocate = check_relocate(arena)
+    upgrade = pick_upgrade(arena)
+
+    if not commands and not relocate and not upgrade:
+        return None
+
+    body: dict = {
+        "command": [{"path": c} for c in commands],
+        "plantationUpgrade": upgrade,
+    }
+    if relocate is not None:
+        body["relocateMain"] = relocate
+    return body
