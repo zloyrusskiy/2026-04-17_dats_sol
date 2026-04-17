@@ -90,12 +90,15 @@ def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
         occupied.add(tuple(c.position))
     mountains = {tuple(m) for m in arena.mountains}
     beaver_positions = [b.position for b in arena.beavers]
+    haz = hazardous_positions(arena)
 
     def is_safe(c: Position) -> bool:
         if c[0] < 0 or c[1] < 0 or c[0] >= arena.size[0] or c[1] >= arena.size[1]:
             return False
         ct = (c[0], c[1])
         if ct in occupied or ct in mountains:
+            return False
+        if (c[0], c[1]) in haz:
             return False
         for bp in beaver_positions:
             if chebyshev(c, bp) <= 2:
@@ -145,12 +148,15 @@ def lateral_targets(arena: Arena) -> list[tuple[Plantation, Position]]:
         occupied.add(tuple(c.position))
     mountains = {tuple(m) for m in arena.mountains}
     beaver_positions = [b.position for b in arena.beavers]
+    haz = hazardous_positions(arena)
 
     def is_safe(c: Position) -> bool:
         if c[0] < 0 or c[1] < 0 or c[0] >= arena.size[0] or c[1] >= arena.size[1]:
             return False
         ct = (c[0], c[1])
         if ct in occupied or ct in mountains:
+            return False
+        if (c[0], c[1]) in haz:
             return False
         for bp in beaver_positions:
             if chebyshev(c, bp) <= 2:

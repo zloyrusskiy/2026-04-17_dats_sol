@@ -606,3 +606,44 @@ def test_check_relocate_skips_fresh_neighbor_near_beaver():
         },
     })
     assert check_relocate(arena) is None
+
+
+def test_pick_target_skips_cells_in_storm_path():
+    hq = make_plant([7, 6], is_main=True)
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [hq], "enemy": [], "mountains": [], "cells": [],
+        "construction": [], "beavers": [],
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+        "meteoForecasts": [
+            {"kind": "sandstorm", "id": "m1", "forming": False,
+             "position": [7, 7], "radius": 0, "turnsUntil": 1},
+        ],
+    })
+    target = pick_target(arena, arena.plantations[0])
+    assert target != [7, 7]
+
+
+def test_lateral_targets_skips_hazardous_perpendicular():
+    from cherviak.models import Cell
+    hq = make_plant([5, 5], is_main=True, pid="hq")
+    rib_parent = make_plant([7, 5], pid="r1")
+    arena = Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [hq, rib_parent], "enemy": [], "mountains": [],
+        "cells": [], "construction": [], "beavers": [],
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+        "meteoForecasts": [
+            # cover both [7,6] and [7,4]
+            {"kind": "sandstorm", "id": "m1", "forming": False,
+             "position": [7, 5], "radius": 1, "turnsUntil": 1},
+        ],
+    })
+    arena.cells.append(Cell.model_validate(make_cell([7, 5], progress=80)))
+    assert lateral_targets(arena) == []
