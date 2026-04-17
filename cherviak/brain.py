@@ -26,6 +26,23 @@ def nearest_bonus_distance(p: Position) -> int:
     return abs(x - bx) + abs(y - by)
 
 
+STORM_LOOKAHEAD = 3
+
+
+def hazardous_positions(arena: Arena, lookahead: int = STORM_LOOKAHEAD) -> set[tuple[int, int]]:
+    """Cells expected to be inside a storm in the next `lookahead` turns."""
+    haz: set[tuple[int, int]] = set()
+    for f in arena.meteo_forecasts:
+        if f.position is None or f.radius is None:
+            continue
+        cx, cy = f.position
+        r = f.radius
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                haz.add((cx + dx, cy + dy))
+    return haz
+
+
 def forward_direction(hq: Position, p: Position) -> tuple[int, int]:
     """Unit-vector direction from hq to p. For diagonal, return X-axis component."""
     dx = p[0] - hq[0]

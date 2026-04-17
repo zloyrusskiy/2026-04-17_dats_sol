@@ -467,3 +467,60 @@ def test_decide_turn_lateral_returns_none_when_nothing_to_do():
         mountains=[[6, 5], [4, 5], [5, 6], [5, 4]],
     )
     assert decide_turn_lateral(arena) is None
+
+
+from cherviak.brain import STORM_LOOKAHEAD, hazardous_positions
+
+
+def make_meteo(kind="sandstorm", position=None, next_position=None,
+               radius=None, turns_until=None, forming=False, mid="m1"):
+    out = {"kind": kind, "id": mid, "forming": forming}
+    if position is not None:
+        out["position"] = position
+    if next_position is not None:
+        out["nextPosition"] = next_position
+    if radius is not None:
+        out["radius"] = radius
+    if turns_until is not None:
+        out["turnsUntil"] = turns_until
+    return out
+
+
+def make_arena_with_meteo(meteo_list):
+    return Arena.model_validate({
+        "turnNo": 1, "nextTurnIn": 1.0, "size": [100, 100], "actionRange": 2,
+        "plantations": [], "enemy": [], "mountains": [], "cells": [],
+        "construction": [], "beavers": [],
+        "plantationUpgrades": {
+            "points": 0, "intervalTurns": 30, "turnsUntilPoints": 30,
+            "maxPoints": 15, "tiers": [],
+        },
+        "meteoForecasts": meteo_list,
+    })
+
+
+def test_hazardous_positions_stationary_storm_marks_chebyshev_radius():
+    arena = make_arena_with_meteo([
+        make_meteo(position=[10, 10], radius=1, turns_until=1),
+    ])
+    haz = hazardous_positions(arena)
+    # 3x3 around [10,10]
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            assert (10 + dx, 10 + dy) in haz
+    assert (12, 10) not in haz
+    assert (10, 12) not in haz
+
+
+def test_hazardous_positions_skips_meteo_without_position_or_radius():
+    arena = make_arena_with_meteo([
+        make_meteo(kind="solar_flare", position=None, radius=None, turns_until=2),
+        make_meteo(position=[5, 5], radius=None, turns_until=1),
+        make_meteo(position=None, radius=2, turns_until=1),
+    ])
+    assert hazardous_positions(arena) == set()
+
+
+def test_hazardous_positions_empty_when_no_meteo():
+    arena = make_arena_with_meteo([])
+    assert hazardous_positions(arena) == set()
