@@ -35,11 +35,21 @@ def hazardous_positions(arena: Arena, lookahead: int = STORM_LOOKAHEAD) -> set[t
     for f in arena.meteo_forecasts:
         if f.position is None or f.radius is None:
             continue
-        cx, cy = f.position
-        r = f.radius
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                haz.add((cx + dx, cy + dy))
+        x0, y0 = f.position
+        if f.next_position is not None and f.turns_until and f.turns_until > 0:
+            x1, y1 = f.next_position
+            steps = min(lookahead, f.turns_until)
+        else:
+            x1, y1 = x0, y0
+            steps = lookahead
+        denom = max(steps, 1)
+        for t in range(steps + 1):
+            cx = x0 + round((x1 - x0) * t / denom)
+            cy = y0 + round((y1 - y0) * t / denom)
+            r = f.radius
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    haz.add((cx + dx, cy + dy))
     return haz
 
 

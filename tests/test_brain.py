@@ -524,3 +524,31 @@ def test_hazardous_positions_skips_meteo_without_position_or_radius():
 def test_hazardous_positions_empty_when_no_meteo():
     arena = make_arena_with_meteo([])
     assert hazardous_positions(arena) == set()
+
+
+def test_hazardous_positions_moving_storm_marks_path_cells():
+    # storm at [10,10], moving to [13,10], turns_until=3, radius=0
+    # lookahead=3: centres at t=0 [10,10], t=1 [11,10], t=2 [12,10], t=3 [13,10]
+    arena = make_arena_with_meteo([
+        make_meteo(position=[10, 10], next_position=[13, 10], radius=0, turns_until=3),
+    ])
+    haz = hazardous_positions(arena, lookahead=3)
+    assert (10, 10) in haz
+    assert (11, 10) in haz
+    assert (12, 10) in haz
+    assert (13, 10) in haz
+    assert (14, 10) not in haz
+
+
+def test_hazardous_positions_moving_storm_with_radius_marks_swept_band():
+    arena = make_arena_with_meteo([
+        make_meteo(position=[5, 5], next_position=[7, 5], radius=1, turns_until=2),
+    ])
+    haz = hazardous_positions(arena, lookahead=2)
+    # at t=0: 3x3 around [5,5]; at t=1: around [6,5]; at t=2: around [7,5]
+    for cx in (5, 6, 7):
+        for dy in (-1, 0, 1):
+            assert (cx, 5 + dy) in haz
+    assert (8, 5) in haz  # right edge of t=2 radius
+    assert (4, 5) in haz  # left edge of t=0 radius
+    assert (9, 5) not in haz
