@@ -50,6 +50,8 @@ cp .env.example .env
 Поддерживаемые переменные:
 - `DATS_TOKEN` — токен игрока
 - `DATS_BASE_URL` — базовый URL сервера, по умолчанию `https://games-test.datsteam.dev`
+- `LATENCY_AVG` — порог latency в секундах (по умолчанию `0.1`). Если `arena.nextTurnIn` меньше этого значения, раннер не шлёт команду в текущем ходе
+- `POLL_INTERVAL` — период игрового цикла раннера в секундах (по умолчанию `0.5`)
 
 Все команды запускай через локальный Python из `venv/`.
 
@@ -94,13 +96,21 @@ venv/bin/python scripts/session_viewer.py --cell-size 24
 - логи, привязанные к конкретному ходу
 - `decision/response` для каждого кадра
 
-## Recorder и управление стратегией
+## Runner и управление стратегией
 
-Скрипт [scripts/run_session.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/run_session.py:1) запускает session recorder. Стратегия выбирается явно через `--strategy`.
+Скрипт [scripts/run_session.py](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/scripts/run_session.py:1) запускает игровой цикл. Стратегия выбирается явно через `--strategy`.
 
 Сейчас доступны:
 - `passive` — [PassiveStrategy](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/cherviak/strategies/passive.py:1), ничего не отправляет и только пишет историю арены и логов
 - `lateral` — [LateralStrategy](/Users/alexandrfedorov/src/hackatons/2026-04-17_dats_sol/cherviak/strategies/lateral.py:1), «рыба-червяк» с боковыми ответвлениями
+
+Алгоритм:
+- каждые `POLL_INTERVAL` (по умолчанию `0.5s`) делаем `GET /api/arena`
+- если `arena.nextTurnIn > LATENCY_AVG` и в текущем `turnNo` ещё не было отправки — стратегия считает решение и оно отправляется через `POST /api/command`
+- на один `turnNo` — не более одной команды
+- после принятия решения/отправки команды цикл спит `max(0, POLL_INTERVAL - elapsed)` до следующего тика
+- никаких ретраев: все ошибки просто логируются
+- сессия уникальна по `id` плантации с `isMain: true` — директория `artifacts/sessions/session_<hqId>/`
 
 Как этим управлять:
 - для безопасного dry-run запускай без `--submit`
@@ -108,7 +118,7 @@ venv/bin/python scripts/session_viewer.py --cell-size 24
 - если `--strategy` не указан, скрипт покажет список доступных стратегий
 - в консоль логика раннера пишет сообщения уровня `INFO`
 - HTTP-запросы и ответы пишутся на уровне `DEBUG`
-- для каждого нового хода в лог попадает `decision_time_ms` — сколько стратегия думала над `decide_turn`
+- для каждого хода в лог попадает `decision_ms` (время стратегии) и `submit_ms` (время POST-а команды)
 
 Примеры:
 
@@ -119,10 +129,10 @@ venv/bin/python scripts/run_session.py --strategy passive --submit
 venv/bin/python scripts/run_session.py --strategy lateral --submit
 ```
 
-Что пишет:
-- `artifacts/sessions/<session_id>/meta.json`
-- `artifacts/sessions/<session_id>/turns.jsonl`
-- `artifacts/sessions/<session_id>/logs.jsonl`
+Что пишет (в `artifacts/sessions/session_<hqId>/`):
+- `meta.json` — параметры сессии (`hqId`, `strategy`, `submit`, `latencyAvg`, `startedAt`)
+- `turns.jsonl` — события `round_started`, `turn`, `skip`, `round_finished`, `http_error`, `network_error`
+- `logs.jsonl` — склеенные записи `/api/logs` сервера
 
 ## Анализ игровых логов
 

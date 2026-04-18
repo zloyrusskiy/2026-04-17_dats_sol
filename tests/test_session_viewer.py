@@ -21,8 +21,14 @@ def test_list_sessions_uses_lightweight_summary(tmp_path, monkeypatch):
     older.mkdir()
     latest.mkdir()
 
-    write_json(older / "meta.json", {"startedAt": "2026-04-17T10:00:00Z", "strategy": "passive"})
-    write_json(latest / "meta.json", {"startedAt": "2026-04-17T11:00:00Z", "strategy": "lateral"})
+    write_json(
+        older / "meta.json",
+        {"startedAt": "2026-04-17T10:00:00Z", "strategy": "passive", "hqId": "hq-old", "latencyAvg": 0.1},
+    )
+    write_json(
+        latest / "meta.json",
+        {"startedAt": "2026-04-17T11:00:00Z", "strategy": "lateral", "hqId": "hq-new", "latencyAvg": 0.15},
+    )
     write_jsonl(older / "turns.jsonl", [{"kind": "turn", "turnNo": 3}, {"kind": "turn", "turnNo": 4}])
     write_jsonl(latest / "turns.jsonl", [{"kind": "turn", "turnNo": 10}, {"kind": "turn", "turnNo": 11}])
     write_jsonl(older / "logs.jsonl", [{"message": "a"}])
@@ -41,6 +47,8 @@ def test_list_sessions_uses_lightweight_summary(tmp_path, monkeypatch):
     assert sessions[0]["firstTurn"] == 10
     assert sessions[0]["lastTurn"] == 11
     assert sessions[0]["logCount"] == 2
+    assert sessions[0]["hqId"] == "hq-new"
+    assert sessions[0]["latencyAvg"] == 0.15
 
 
 def test_load_session_exposes_html_legend_separately(tmp_path):
@@ -62,11 +70,13 @@ def test_load_session_exposes_html_legend_separately(tmp_path):
                     "cells": [{"position": [0, 0], "terraformationProgress": 55}],
                     "construction": [],
                     "enemy": [],
-                    "plantations": [{"position": [1, 1], "isMain": True, "hp": 99}],
+                    "plantations": [{"id": "hq-42", "position": [1, 1], "isMain": True, "hp": 99}],
                     "beavers": [],
                 },
                 "capturedAt": "2026-04-17T12:00:00Z",
                 "nextTurnIn": 1,
+                "strategyElapsedMs": 12.5,
+                "submitElapsedMs": 5.0,
                 "decision": {"kind": "wait"},
                 "response": {"ok": True},
             }
@@ -81,3 +91,6 @@ def test_load_session_exposes_html_legend_separately(tmp_path):
     assert frame["legend"]["stats"][0] == "turn: 7"
     assert any(item["label"] == "your HQ" for item in frame["legend"]["items"])
     assert 'width="138"' in frame["svg"]
+    assert frame["hqId"] == "hq-42"
+    assert frame["strategyElapsedMs"] == 12.5
+    assert frame["submitElapsedMs"] == 5.0

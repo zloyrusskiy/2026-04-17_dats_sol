@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Record arena snapshots and logs across active rounds."""
+"""Run the strategy game loop and record arena snapshots.
+
+Loop model:
+  * Каждые POLL_INTERVAL секунд (env: POLL_INTERVAL, default 0.5) делаем GET /api/arena.
+  * Если arena.nextTurnIn > LATENCY_AVG и в этом turnNo мы ещё не
+    отправляли команду — принимаем решение и POST /api/command.
+  * Один turnNo = не более одной команды.
+  * Никаких ретраев: ошибки просто логируются.
+  * Сессия уникальна по id плантации с isMain: true.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +18,7 @@ import json
 import logging
 import sys
 import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +30,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from cherviak.client import GameClient
-from cherviak.config import load_config
+from cherviak.config import Config, load_config
 from cherviak.strategies import LateralStrategy, PassiveStrategy
 
 
@@ -31,13 +40,6 @@ STRATEGIES = {
     LateralStrategy.name: LateralStrategy,
 }
 
-# Floor for the sleep between arena polls to avoid a busy loop when the
-# server-reported boundary is effectively "now".
-MIN_POLL_SLEEP = 0.02
-LATENCY_ALPHA = 0.2
-LATENCY_JITTER_ALPHA = 0.2
-ARENA_WARMUP_SAMPLES = 3
-
 
 def available_strategy_names() -> list[str]:
     return sorted(STRATEGIES)
@@ -45,7 +47,7 @@ def available_strategy_names() -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Запустить recorder и писать arena/logs в историю."
+        description="Игровой цикл раннера: пишет arena/logs и (опционально) отправляет команды."
     )
     parser.add_argument(
         "--strategy",
@@ -62,18 +64,12 @@ def parse_args() -> argparse.Namespace:
         "--logs-interval",
         type=float,
         default=5.0,
-        help="Как часто запрашивать /api/logs во время активной игры.",
-    )
-    parser.add_argument(
-        "--idle-sleep",
-        type=float,
-        default=5.0,
-        help="Пауза между проверками, когда активной игры нет.",
+        help="Как часто запрашивать /api/logs.",
     )
     parser.add_argument(
         "--submit",
         action="store_true",
-        help="Разрешить отправку команд стратегии. По умолчанию recorder только пишет историю.",
+        help="Разрешить отправку команд стратегии. По умолчанию — только запись истории.",
     )
     args = parser.parse_args()
 
@@ -114,48 +110,54 @@ def looks_like_active_arena(arena: Any) -> bool:
     return width > 0 and height > 0
 
 
-def make_session_dir(root: Path) -> Path:
-    session_dir = root / datetime.now(timezone.utc).strftime("session_%Y%m%dT%H%M%SZ")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir
+def find_hq_id(arena: Any) -> str | None:
+    for plantation in arena.plantations:
+        if plantation.is_main:
+            return plantation.id
+    return None
 
 
-def write_meta(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+@dataclass
+class SessionWriter:
+    """Создаёт session_<hqId>/ когда видит HQ, пишет turns.jsonl и logs.jsonl."""
 
+    root: Path
+    strategy_name: str
+    submit: bool
+    latency_avg: float
+    poll_interval: float
+    base_url: str
+    hq_id: str | None = None
+    session_dir: Path | None = None
+    turns_path: Path | None = None
+    logs_path: Path | None = None
 
-def update_latency_estimate(
-    state: dict[str, float],
-    observed_latency: float,
-) -> tuple[float, float]:
-    """Update one-way latency EWMA and jitter EWMA; return both."""
-    if not state:
-        state["mean"] = observed_latency
-        state["jitter"] = 0.0
-        return state["mean"], state["jitter"]
-
-    previous_mean = state["mean"]
-    mean = (1.0 - LATENCY_ALPHA) * previous_mean + LATENCY_ALPHA * observed_latency
-    jitter = (
-        (1.0 - LATENCY_JITTER_ALPHA) * state["jitter"]
-        + LATENCY_JITTER_ALPHA * abs(observed_latency - previous_mean)
-    )
-    state["mean"] = mean
-    state["jitter"] = jitter
-    return mean, jitter
-
-
-def effective_latency(mean_latency: float, jitter: float) -> float:
-    """Conservative one-way estimate used for deadline checks."""
-    return mean_latency + 2.0 * jitter
-
-
-def warmup_complete(sample_count: int) -> bool:
-    return sample_count >= ARENA_WARMUP_SAMPLES
-
-
-def compute_arena_sleep(next_turn_in: float, latency: float) -> float:
-    return max(MIN_POLL_SLEEP, next_turn_in - latency / 2)
+    def ensure_for_hq(self, hq_id: str) -> bool:
+        """Switch to session dir for the given HQ id. Returns True if it changed."""
+        if self.hq_id == hq_id:
+            return False
+        self.hq_id = hq_id
+        session_dir = self.root / f"session_{hq_id}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir = session_dir
+        self.turns_path = session_dir / "turns.jsonl"
+        self.logs_path = session_dir / "logs.jsonl"
+        meta_path = session_dir / "meta.json"
+        if not meta_path.exists():
+            meta = {
+                "startedAt": utc_now(),
+                "hqId": hq_id,
+                "strategy": self.strategy_name,
+                "submit": self.submit,
+                "baseUrl": self.base_url,
+                "latencyAvg": self.latency_avg,
+                "pollInterval": self.poll_interval,
+            }
+            meta_path.write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return True
 
 
 def describe_command_status(
@@ -236,62 +238,25 @@ def summarize_response_errors(response: dict[str, Any] | None) -> str:
 def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("cherviak.client").setLevel(logging.DEBUG)
-
-
-async def fetch_arena(client: GameClient) -> tuple[Any, float]:
-    """GET /api/arena; return (arena, rtt)."""
-    t_send = time.monotonic()
-    arena = await asyncio.to_thread(client.get_arena)
-    return arena, time.monotonic() - t_send
-
-
-async def fetch_arena_once(
-    client: GameClient,
-    turns_path: Path,
-) -> tuple[Any, float] | None:
-    """Attempt a single GET /api/arena and log any transport/HTTP failure."""
-    try:
-        return await fetch_arena(client)
-    except httpx.HTTPStatusError as exc:
-        append_jsonl(
-            turns_path,
-            {
-                "capturedAt": utc_now(),
-                "kind": "http_error",
-                "statusCode": exc.response.status_code,
-                "body": exc.response.text,
-            },
-        )
-    except httpx.HTTPError as exc:
-        append_jsonl(
-            turns_path,
-            {
-                "capturedAt": utc_now(),
-                "kind": "network_error",
-                "error": str(exc),
-            },
-        )
-    return None
+    logging.getLogger("cherviak.client.arena_raw").setLevel(logging.INFO)
 
 
 async def decide_and_submit(
     strategy: Any,
     client: GameClient,
     arena: Any,
-    args: argparse.Namespace,
+    submit: bool,
     turns_path: Path,
 ) -> None:
-    """Compute the strategy's decision and POST the command.
-
-    Runs as a background task so the main loop can proceed to its
-    next-arena sleep immediately.
-    """
+    """Синхронно считает решение и (при submit) отправляет его."""
     decision_started_at = time.perf_counter()
     command = strategy.decide_turn(arena)
     decision_elapsed_ms = (time.perf_counter() - decision_started_at) * 1000
 
     response: dict[str, Any] | None = None
-    if args.submit and command:
+    submit_elapsed_ms = 0.0
+    if submit and command:
+        submit_started_at = time.perf_counter()
         try:
             response = await asyncio.to_thread(client.post_command, command)
         except httpx.HTTPStatusError as exc:
@@ -302,9 +267,10 @@ async def decide_and_submit(
             }
         except httpx.HTTPError as exc:
             response = {"error": str(exc)}
+        submit_elapsed_ms = (time.perf_counter() - submit_started_at) * 1000
 
     strategy.on_turn_result(arena, command, response)
-    command_status = describe_command_status(command, args.submit, response)
+    command_status = describe_command_status(command, submit, response)
     construction_status = summarize_construction(arena)
     decision_summary = summarize_decision(command)
     response_errors = summarize_response_errors(response)
@@ -316,15 +282,18 @@ async def decide_and_submit(
             "turnNo": arena.turn_no,
             "nextTurnIn": arena.next_turn_in,
             "strategyElapsedMs": round(decision_elapsed_ms, 3),
+            "submitElapsedMs": round(submit_elapsed_ms, 3),
             "arena": serialize(arena),
             "decision": command,
             "response": response,
         },
     )
     logging.info(
-        "turn=%s decision_time_ms=%.1f plantations=%s cells=%s construction=%s decision=%s command=%s errors=%s",
+        "turn=%s nextTurnIn=%.3f decision_ms=%.1f submit_ms=%.1f plantations=%s cells=%s construction=%s decision=%s command=%s errors=%s",
         arena.turn_no,
+        arena.next_turn_in,
         decision_elapsed_ms,
+        submit_elapsed_ms,
         len(arena.plantations),
         len(arena.cells),
         construction_status,
@@ -335,50 +304,52 @@ async def decide_and_submit(
 
 
 async def logs_loop(
-    config: Any,
-    logs_path: Path,
+    config: Config,
+    session_writer: SessionWriter,
     interval: float,
     stop_event: asyncio.Event,
 ) -> None:
-    """Standalone coroutine polling /api/logs independently of game ticks."""
+    """Опрашивает /api/logs независимо от игрового цикла."""
     seen_log_keys: set[tuple[str, str]] = set()
     with GameClient(config, log_requests=False) as client:
         while not stop_event.is_set():
-            try:
-                logs = await asyncio.to_thread(client.get_logs)
-            except httpx.HTTPStatusError as exc:
-                append_jsonl(
-                    logs_path,
-                    {
-                        "capturedAt": utc_now(),
-                        "kind": "logs_error",
-                        "statusCode": exc.response.status_code,
-                        "body": exc.response.text,
-                    },
-                )
-            except httpx.HTTPError as exc:
-                append_jsonl(
-                    logs_path,
-                    {
-                        "capturedAt": utc_now(),
-                        "kind": "logs_error",
-                        "error": str(exc),
-                    },
-                )
-            else:
-                for item in logs:
-                    key = (str(item.get("time", "")), str(item.get("message", "")))
-                    if key in seen_log_keys:
-                        continue
-                    seen_log_keys.add(key)
+            logs_path = session_writer.logs_path
+            if logs_path is not None:
+                try:
+                    logs = await asyncio.to_thread(client.get_logs)
+                except httpx.HTTPStatusError as exc:
                     append_jsonl(
                         logs_path,
                         {
                             "capturedAt": utc_now(),
-                            "kind": "log",
-                            "entry": item,
+                            "kind": "logs_error",
+                            "statusCode": exc.response.status_code,
+                            "body": exc.response.text,
                         },
                     )
+                except httpx.HTTPError as exc:
+                    append_jsonl(
+                        logs_path,
+                        {
+                            "capturedAt": utc_now(),
+                            "kind": "logs_error",
+                            "error": str(exc),
+                        },
+                    )
+                else:
+                    for item in logs:
+                        key = (str(item.get("time", "")), str(item.get("message", "")))
+                        if key in seen_log_keys:
+                            continue
+                        seen_log_keys.add(key)
+                        append_jsonl(
+                            logs_path,
+                            {
+                                "capturedAt": utc_now(),
+                                "kind": "log",
+                                "entry": item,
+                            },
+                        )
 
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
@@ -390,98 +361,143 @@ async def logs_loop(
 async def play_loop(
     client: GameClient,
     strategy: Any,
-    args: argparse.Namespace,
-    turns_path: Path,
+    session_writer: SessionWriter,
+    submit: bool,
+    latency_avg: float,
+    poll_interval: float,
 ) -> None:
-    """Main game cycle.
-
-    Steps per tick:
-      1. Seed arena (first iteration) or refresh it.
-      2. latency := rtt / 2.
-      3. If next_turn_in < 2*latency → warn, skip command (can't deliver in time).
-      4. Else spawn decide+submit as a background task (does not block the loop).
-      5. Sleep (next_turn_in - latency / 2 - boundary_margin), then loop.
-    """
-    last_turn_no: int | None = None
+    """Главный игровой цикл. Тик длится poll_interval секунд."""
+    last_submitted_turn: int | None = None
     active_round = False
-    active_round_samples = 0
-    decision_task: asyncio.Task | None = None
-    latency_state: dict[str, float] = {}
 
     while True:
-        arena_sample = await fetch_arena_once(client, turns_path)
-        if arena_sample is None:
-            await asyncio.sleep(args.idle_sleep)
+        tick_started = time.perf_counter()
+
+        try:
+            arena = await asyncio.to_thread(client.get_arena)
+        except httpx.HTTPStatusError as exc:
+            logging.warning(
+                "arena fetch failed status=%s body=%s",
+                exc.response.status_code,
+                exc.response.text.strip(),
+            )
+            if session_writer.turns_path is not None:
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "http_error",
+                        "statusCode": exc.response.status_code,
+                        "body": exc.response.text,
+                    },
+                )
+            await _sleep_remaining(tick_started, poll_interval)
+            continue
+        except httpx.HTTPError as exc:
+            logging.warning("arena fetch failed: %s", exc)
+            if session_writer.turns_path is not None:
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "network_error",
+                        "error": str(exc),
+                    },
+                )
+            await _sleep_remaining(tick_started, poll_interval)
             continue
 
-        arena, rtt = arena_sample
-        observed_latency = rtt / 2.0
-        mean_latency, jitter = update_latency_estimate(latency_state, observed_latency)
-        latency = effective_latency(mean_latency, jitter)
-
         if not looks_like_active_arena(arena):
-            if active_round:
+            if active_round and session_writer.turns_path is not None:
                 append_jsonl(
-                    turns_path,
+                    session_writer.turns_path,
                     {
                         "capturedAt": utc_now(),
                         "kind": "round_finished",
-                        "lastTurnNo": last_turn_no,
+                        "lastTurnNo": last_submitted_turn,
                     },
                 )
+                logging.info("round finished (last turn %s)", last_submitted_turn)
             active_round = False
-            active_round_samples = 0
-            last_turn_no = None
-            await asyncio.sleep(args.idle_sleep)
+            last_submitted_turn = None
+            await _sleep_remaining(tick_started, poll_interval)
             continue
 
-        if not active_round:
+        hq_id = find_hq_id(arena)
+        if hq_id is None:
+            logging.info(
+                "turn=%s nextTurnIn=%.3f no HQ plantation — waiting",
+                arena.turn_no,
+                arena.next_turn_in,
+            )
+            await _sleep_remaining(tick_started, poll_interval)
+            continue
+
+        switched = session_writer.ensure_for_hq(hq_id)
+        if switched:
+            logging.info(
+                "session opened: hqId=%s dir=%s",
+                hq_id,
+                session_writer.session_dir,
+            )
             strategy.on_round_started()
             append_jsonl(
-                turns_path,
+                session_writer.turns_path,
                 {
                     "capturedAt": utc_now(),
                     "kind": "round_started",
+                    "hqId": hq_id,
                     "turnNo": arena.turn_no,
                     "arena": serialize(arena),
                 },
             )
             active_round = True
-            active_round_samples = 1
-        else:
-            active_round_samples += 1
+            last_submitted_turn = None
 
-        if not warmup_complete(active_round_samples):
+        if not active_round:
+            active_round = True
+
+        if arena.next_turn_in <= latency_avg:
             logging.info(
-                "turn=%s arena warmup sample %s/%s — delaying commands",
+                "turn=%s nextTurnIn=%.3f <= latencyAvg=%.3f — skip",
                 arena.turn_no,
-                active_round_samples,
-                ARENA_WARMUP_SAMPLES,
+                arena.next_turn_in,
+                latency_avg,
             )
-        elif arena.turn_no != last_turn_no:
-            if arena.next_turn_in < 2 * latency:
-                logging.warning(
-                    "turn=%s nextTurnIn=%.3f < 2*latency=%.3f (observed=%.3f mean=%.3f jitter=%.3f) — skipping submit (won't reach server in time)",
-                    arena.turn_no,
-                    arena.next_turn_in,
-                    2 * latency,
-                    observed_latency,
-                    mean_latency,
-                    jitter,
-                )
-            elif decision_task is not None and not decision_task.done():
-                logging.warning(
-                    "turn=%s previous decision still running — skipping submit",
-                    arena.turn_no,
-                )
-            else:
-                decision_task = asyncio.create_task(
-                    decide_and_submit(strategy, client, arena, args, turns_path)
-                )
-            last_turn_no = arena.turn_no
+            append_jsonl(
+                session_writer.turns_path,
+                {
+                    "capturedAt": utc_now(),
+                    "kind": "skip",
+                    "turnNo": arena.turn_no,
+                    "nextTurnIn": arena.next_turn_in,
+                    "reason": "late",
+                    "latencyAvg": latency_avg,
+                },
+            )
+        elif last_submitted_turn == arena.turn_no:
+            logging.debug(
+                "turn=%s already submitted — skip",
+                arena.turn_no,
+            )
+        else:
+            await decide_and_submit(
+                strategy,
+                client,
+                arena,
+                submit,
+                session_writer.turns_path,
+            )
+            last_submitted_turn = arena.turn_no
 
-        sleep_for = compute_arena_sleep(arena.next_turn_in, latency)
-        await asyncio.sleep(sleep_for)
+        await _sleep_remaining(tick_started, poll_interval)
+
+
+async def _sleep_remaining(tick_started: float, poll_interval: float) -> None:
+    elapsed = time.perf_counter() - tick_started
+    remaining = poll_interval - elapsed
+    if remaining > 0:
+        await asyncio.sleep(remaining)
 
 
 async def main_async() -> int:
@@ -490,33 +506,35 @@ async def main_async() -> int:
     config = load_config()
     strategy = STRATEGIES[args.strategy]()
 
-    session_dir = make_session_dir(args.output_dir)
-    meta_path = session_dir / "meta.json"
-    turns_path = session_dir / "turns.jsonl"
-    logs_path = session_dir / "logs.jsonl"
-
-    write_meta(
-        meta_path,
-        {
-            "startedAt": utc_now(),
-            "baseUrl": config.base_url,
-            "strategy": strategy.name,
-            "submit": args.submit,
-            "logsInterval": args.logs_interval,
-            "idleSleep": args.idle_sleep,
-        },
+    session_writer = SessionWriter(
+        root=args.output_dir,
+        strategy_name=strategy.name,
+        submit=args.submit,
+        latency_avg=config.latency_avg,
+        poll_interval=config.poll_interval,
+        base_url=config.base_url,
     )
 
-    print(f"Session dir: {session_dir}")
+    print(
+        f"Sessions root: {args.output_dir} "
+        f"(каждая сессия — session_<hqId>, poll={config.poll_interval}s, latencyAvg={config.latency_avg}s)"
+    )
 
     stop_event = asyncio.Event()
     logs_task = asyncio.create_task(
-        logs_loop(config, logs_path, args.logs_interval, stop_event)
+        logs_loop(config, session_writer, args.logs_interval, stop_event)
     )
 
     try:
         with GameClient(config, log_requests=True) as client:
-            await play_loop(client, strategy, args, turns_path)
+            await play_loop(
+                client,
+                strategy,
+                session_writer,
+                submit=args.submit,
+                latency_avg=config.latency_avg,
+                poll_interval=config.poll_interval,
+            )
     finally:
         stop_event.set()
         try:

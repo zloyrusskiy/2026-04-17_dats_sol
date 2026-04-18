@@ -131,6 +131,8 @@ def summarize_session(session_path: Path) -> dict[str, Any]:
         "label": session_path.name,
         "startedAt": meta.get("startedAt"),
         "strategy": meta.get("strategy"),
+        "hqId": meta.get("hqId"),
+        "latencyAvg": meta.get("latencyAvg"),
         "frameCount": frame_count,
         "logCount": log_count,
         "firstTurn": first_turn,
@@ -480,7 +482,10 @@ def load_session(session_path_str: str, cell_size: int) -> dict[str, Any]:
                 "plantations": plantation_count,
                 "cells": cell_count,
                 "hqHp": None if hq is None else hq.get("hp"),
+                "hqId": None if hq is None else hq.get("id"),
                 "hqPosition": None if hq is None else hq.get("position"),
+                "strategyElapsedMs": row.get("strategyElapsedMs"),
+                "submitElapsedMs": row.get("submitElapsedMs"),
                 "svg": render_svg(arena, cell_size, overlays),
                 "legend": build_legend(arena),
                 "logs": frame_logs,
@@ -1065,7 +1070,7 @@ def render_index_html() -> str:
       frameStatusEl.textContent =
         `turn ${frame.turnNo} • ${currentIndex + 1}/${currentSession.frames.length} • plantations ${frame.plantations} • cells ${frame.cells}`;
       frameMetaEl.textContent =
-        `capturedAt: ${frame.capturedAt || '?'} | nextTurnIn: ${frame.nextTurnIn ?? '?'} | hqHp: ${frame.hqHp ?? '?'}`;
+        `capturedAt: ${frame.capturedAt || '?'} | nextTurnIn: ${frame.nextTurnIn ?? '?'} | hqId: ${frame.hqId || '?'} | hqHp: ${frame.hqHp ?? '?'} | decisionMs: ${frame.strategyElapsedMs ?? '?'} | submitMs: ${frame.submitElapsedMs ?? '?'}`;
       framePayloadEl.textContent = JSON.stringify(
         { decision: frame.decision, response: frame.response },
         null,
@@ -1102,9 +1107,10 @@ def render_index_html() -> str:
         btn.innerHTML = `
           <div><strong>${session.label}</strong></div>
           <div class="session-meta">
+            hqId: ${session.hqId || '?'}<br/>
             frames: ${session.frameCount} | turns: ${session.firstTurn ?? '?'}..${session.lastTurn ?? '?'}<br/>
             strategy: ${session.strategy || '?'} | logs: ${session.logCount}<br/>
-            startedAt: ${session.startedAt || '?'}
+            latencyAvg: ${session.latencyAvg ?? '?'}s | startedAt: ${session.startedAt || '?'}
           </div>
         `;
         btn.addEventListener('click', () => loadSession(session.id));

@@ -11,6 +11,7 @@ from cherviak.models import Arena
 
 
 logger = logging.getLogger(__name__)
+arena_raw_logger = logging.getLogger(__name__ + ".arena_raw")
 KEEPALIVE_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0)
 HTTP2_ENABLED = find_spec("h2") is not None
 
@@ -127,7 +128,7 @@ class GameClient:
             f"turnNo={payload.get('turnNo')} "
             f"nextTurnIn={payload.get('nextTurnIn')}"
         )
-        logger.debug(
+        arena_raw_logger.debug(
             "%s == GET /api/arena raw=%s",
             self._timestamp(),
             dumps(payload, ensure_ascii=True, separators=(",", ":")),
