@@ -1,33 +1,8 @@
 import httpx
 import pytest
 
-from cherviak.client import GameClient, _is_retryable_http_error
+from cherviak.client import GameClient, HTTP2_ENABLED, KEEPALIVE_LIMITS
 from cherviak.config import Config
-
-
-def make_status_error(status_code: int) -> httpx.HTTPStatusError:
-    request = httpx.Request("GET", "https://example.test/api/logs")
-    response = httpx.Response(status_code, request=request)
-    return httpx.HTTPStatusError("boom", request=request, response=response)
-
-
-def test_retryable_for_transient_network_errors():
-    request = httpx.Request("GET", "https://example.test/api/arena")
-    exc = httpx.ReadTimeout("boom", request=request)
-    assert _is_retryable_http_error(exc) is True
-
-
-def test_retryable_for_server_errors():
-    assert _is_retryable_http_error(make_status_error(503)) is True
-
-
-def test_not_retryable_for_rate_limit():
-    assert _is_retryable_http_error(make_status_error(429)) is False
-
-
-def test_not_retryable_for_other_client_errors():
-    assert _is_retryable_http_error(make_status_error(400)) is False
-
 
 def test_timestamp_uses_milliseconds_without_timezone():
     client = GameClient(Config(token="token", base_url="https://example.test"))
@@ -78,4 +53,24 @@ def test_get_arena_logs_turn_number(caplog: pytest.LogCaptureFixture, monkeypatc
 
     assert arena.turn_no == 533
     assert "GET /api/arena status=200" in caplog.text
+    assert "http=HTTP/1.1" in caplog.text
     assert "turnNo=533" in caplog.text
+
+
+def test_client_enables_keepalive_and_http2(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("cherviak.client.httpx.Client", DummyClient)
+
+    client = GameClient(Config(token="token", base_url="https://example.test"))
+
+    assert captured["http2"] is HTTP2_ENABLED
+    assert captured["limits"] == KEEPALIVE_LIMITS
+    client.close()

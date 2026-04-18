@@ -1,31 +1,17 @@
 import logging
 import time
+from importlib.util import find_spec
 from collections.abc import Callable
 from datetime import datetime, timezone
 
 import httpx
-from tenacity import (
-    retry,
-    retry_if_exception,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_fixed,
-)
 from cherviak.config import Config
 from cherviak.models import Arena
 
 
 logger = logging.getLogger(__name__)
-
-
-def _is_retryable_http_error(exc: BaseException) -> bool:
-    if not isinstance(exc, httpx.HTTPError):
-        return False
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return True
-
-    status_code = exc.response.status_code
-    return status_code in {408, 425} or status_code >= 500
+KEEPALIVE_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0)
+HTTP2_ENABLED = find_spec("h2") is not None
 
 
 class GameClient:
@@ -38,6 +24,8 @@ class GameClient:
         self._client = httpx.Client(
             base_url=config.base_url,
             headers={"X-Auth-Token": config.token},
+            http2=HTTP2_ENABLED,
+            limits=KEEPALIVE_LIMITS,
             timeout=timeout,
         )
         self._log_requests = log_requests
@@ -131,18 +119,12 @@ class GameClient:
             self._log_request_finish(method, path, started_at, error=exc)
             raise
 
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_fixed(0.1),
-        retry=retry_if_exception_type(httpx.HTTPError)
-        & retry_if_exception(_is_retryable_http_error),
-        reraise=True,
-    )
     def get_arena(self) -> Arena:
         r = self._request(
             "GET",
             "/api/arena",
             response_details=lambda response: (
+                f"http={response.http_version} "
                 f"turnNo={response.json().get('turnNo')} "
                 f"nextTurnIn={response.json().get('nextTurnIn')}"
             ),
@@ -150,25 +132,11 @@ class GameClient:
         r.raise_for_status()
         return Arena.model_validate(r.json())
 
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_fixed(0.1),
-        retry=retry_if_exception_type(httpx.HTTPError)
-        & retry_if_exception(_is_retryable_http_error),
-        reraise=True,
-    )
     def post_command(self, body: dict) -> dict:
         r = self._request("POST", "/api/command", json_body=body)
         r.raise_for_status()
         return r.json()
 
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_fixed(0.1),
-        retry=retry_if_exception_type(httpx.HTTPError)
-        & retry_if_exception(_is_retryable_http_error),
-        reraise=True,
-    )
     def get_logs(self) -> list[dict]:
         r = self._request("GET", "/api/logs")
         r.raise_for_status()

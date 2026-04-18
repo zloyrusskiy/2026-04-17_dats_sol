@@ -34,6 +34,9 @@ STRATEGIES = {
 # Floor for the sleep between arena polls to avoid a busy loop when the
 # server-reported boundary is effectively "now".
 MIN_POLL_SLEEP = 0.02
+LATENCY_ALPHA = 0.2
+LATENCY_JITTER_ALPHA = 0.2
+ARENA_WARMUP_SAMPLES = 3
 
 
 def available_strategy_names() -> list[str]:
@@ -132,6 +135,36 @@ def compute_retry_after_seconds(exc: httpx.HTTPStatusError, default: float) -> f
 
 def compute_logs_backoff_seconds(exc: httpx.HTTPStatusError, default: float) -> float:
     return compute_retry_after_seconds(exc, default)
+
+
+def update_latency_estimate(
+    state: dict[str, float],
+    observed_latency: float,
+) -> tuple[float, float]:
+    """Update one-way latency EWMA and jitter EWMA; return both."""
+    if not state:
+        state["mean"] = observed_latency
+        state["jitter"] = 0.0
+        return state["mean"], state["jitter"]
+
+    previous_mean = state["mean"]
+    mean = (1.0 - LATENCY_ALPHA) * previous_mean + LATENCY_ALPHA * observed_latency
+    jitter = (
+        (1.0 - LATENCY_JITTER_ALPHA) * state["jitter"]
+        + LATENCY_JITTER_ALPHA * abs(observed_latency - previous_mean)
+    )
+    state["mean"] = mean
+    state["jitter"] = jitter
+    return mean, jitter
+
+
+def effective_latency(mean_latency: float, jitter: float) -> float:
+    """Conservative one-way estimate used for deadline checks."""
+    return mean_latency + 2.0 * jitter
+
+
+def warmup_complete(sample_count: int) -> bool:
+    return sample_count >= ARENA_WARMUP_SAMPLES
 
 
 def describe_command_status(
@@ -418,13 +451,17 @@ async def play_loop(
     """
     last_turn_no: int | None = None
     active_round = False
+    active_round_samples = 0
     command_state: dict[str, float] = {"backoff_until": 0.0}
     decision_task: asyncio.Task | None = None
+    latency_state: dict[str, float] = {}
 
     arena, rtt = await safe_fetch_arena(client, turns_path, args.idle_sleep)
 
     while True:
-        latency = rtt / 2.0
+        observed_latency = rtt / 2.0
+        mean_latency, jitter = update_latency_estimate(latency_state, observed_latency)
+        latency = effective_latency(mean_latency, jitter)
 
         if not looks_like_active_arena(arena):
             if active_round:
@@ -437,6 +474,7 @@ async def play_loop(
                     },
                 )
             active_round = False
+            active_round_samples = 0
             last_turn_no = None
             await asyncio.sleep(args.idle_sleep)
             arena, rtt = await safe_fetch_arena(client, turns_path, args.idle_sleep)
@@ -454,14 +492,27 @@ async def play_loop(
                 },
             )
             active_round = True
+            active_round_samples = 1
+        else:
+            active_round_samples += 1
 
-        if arena.turn_no != last_turn_no:
+        if not warmup_complete(active_round_samples):
+            logging.info(
+                "turn=%s arena warmup sample %s/%s — delaying commands",
+                arena.turn_no,
+                active_round_samples,
+                ARENA_WARMUP_SAMPLES,
+            )
+        elif arena.turn_no != last_turn_no:
             if arena.next_turn_in < 2 * latency:
                 logging.warning(
-                    "turn=%s nextTurnIn=%.3f < 2*latency=%.3f — skipping submit (won't reach server in time)",
+                    "turn=%s nextTurnIn=%.3f < 2*latency=%.3f (observed=%.3f mean=%.3f jitter=%.3f) — skipping submit (won't reach server in time)",
                     arena.turn_no,
                     arena.next_turn_in,
                     2 * latency,
+                    observed_latency,
+                    mean_latency,
+                    jitter,
                 )
             elif decision_task is not None and not decision_task.done():
                 logging.warning(

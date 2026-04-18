@@ -3,6 +3,8 @@ import logging
 import httpx
 
 from scripts.run_session import (
+    ARENA_WARMUP_SAMPLES,
+    effective_latency,
     configure_logging,
     compute_logs_backoff_seconds,
     compute_retry_after_seconds,
@@ -10,6 +12,8 @@ from scripts.run_session import (
     summarize_construction,
     summarize_decision,
     summarize_response_errors,
+    update_latency_estimate,
+    warmup_complete,
 )
 from cherviak.models import Arena
 
@@ -28,6 +32,33 @@ def test_compute_logs_backoff_uses_retry_after_header():
 def test_compute_logs_backoff_falls_back_to_default():
     exc = make_status_error(429)
     assert compute_logs_backoff_seconds(exc, default=5.0) == 5.0
+
+
+def test_update_latency_estimate_initializes_from_first_sample():
+    state: dict[str, float] = {}
+
+    mean, jitter = update_latency_estimate(state, observed_latency=0.25)
+
+    assert mean == 0.25
+    assert jitter == 0.0
+    assert state == {"mean": 0.25, "jitter": 0.0}
+
+
+def test_update_latency_estimate_smooths_single_spike():
+    state: dict[str, float] = {}
+    update_latency_estimate(state, observed_latency=0.10)
+    update_latency_estimate(state, observed_latency=0.10)
+
+    mean, jitter = update_latency_estimate(state, observed_latency=0.50)
+
+    assert round(mean, 3) == 0.18
+    assert round(jitter, 3) == 0.08
+    assert round(effective_latency(mean, jitter), 3) == 0.34
+
+
+def test_warmup_complete_requires_three_samples():
+    assert warmup_complete(ARENA_WARMUP_SAMPLES - 1) is False
+    assert warmup_complete(ARENA_WARMUP_SAMPLES) is True
 
 
 def test_compute_retry_after_seconds_uses_default_floor():
