@@ -455,8 +455,35 @@ def build_logs_by_turn(log_rows: list[dict[str, Any]]) -> dict[int, list[dict[st
     return indexed
 
 
-@lru_cache(maxsize=32)
 def load_session(session_path_str: str, cell_size: int) -> dict[str, Any]:
+    session_path = Path(session_path_str)
+    meta_signature = file_signature(session_path / "meta.json")
+    turns_signature = file_signature(session_path / "turns.jsonl")
+    logs_signature = file_signature(session_path / "logs.jsonl")
+    return _load_session_cached(
+        str(session_path.resolve()),
+        cell_size,
+        meta_signature,
+        turns_signature,
+        logs_signature,
+    )
+
+
+def file_signature(path: Path) -> tuple[int, int]:
+    if not path.exists():
+        return (-1, -1)
+    stat = path.stat()
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=32)
+def _load_session_cached(
+    session_path_str: str,
+    cell_size: int,
+    _meta_signature: tuple[int, int],
+    _turns_signature: tuple[int, int],
+    _logs_signature: tuple[int, int],
+) -> dict[str, Any]:
     session_path = Path(session_path_str)
     meta = load_json(session_path / "meta.json") if (session_path / "meta.json").exists() else {}
     turn_rows = load_jsonl(session_path / "turns.jsonl")

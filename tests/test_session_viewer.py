@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from scripts import session_viewer
@@ -128,3 +129,76 @@ def test_load_session_exposes_html_legend_separately(tmp_path):
     assert frame["hqId"] == "hq-42"
     assert frame["strategyElapsedMs"] == 12.5
     assert frame["submitElapsedMs"] == 5.0
+
+
+def test_load_session_refreshes_when_turns_file_changes(tmp_path):
+    session_dir = tmp_path / "session_20260417T130000Z"
+    session_dir.mkdir()
+
+    turns_path = session_dir / "turns.jsonl"
+    write_json(session_dir / "meta.json", {"strategy": "passive"})
+    write_jsonl(
+        turns_path,
+        [
+            {
+                "kind": "turn",
+                "turnNo": 7,
+                "arena": {
+                    "turnNo": 7,
+                    "size": [2, 2],
+                    "actionRange": 4,
+                    "mountains": [],
+                    "cells": [],
+                    "construction": [],
+                    "enemy": [],
+                    "plantations": [{"id": "hq-42", "position": [1, 1], "isMain": True, "hp": 99}],
+                    "beavers": [],
+                },
+            }
+        ],
+    )
+    write_jsonl(session_dir / "logs.jsonl", [])
+
+    payload = session_viewer.load_session(str(session_dir), cell_size=18)
+    assert [frame["turnNo"] for frame in payload["frames"]] == [7]
+
+    write_jsonl(
+        turns_path,
+        [
+            {
+                "kind": "turn",
+                "turnNo": 7,
+                "arena": {
+                    "turnNo": 7,
+                    "size": [2, 2],
+                    "actionRange": 4,
+                    "mountains": [],
+                    "cells": [],
+                    "construction": [],
+                    "enemy": [],
+                    "plantations": [{"id": "hq-42", "position": [1, 1], "isMain": True, "hp": 99}],
+                    "beavers": [],
+                },
+            },
+            {
+                "kind": "turn",
+                "turnNo": 8,
+                "arena": {
+                    "turnNo": 8,
+                    "size": [2, 2],
+                    "actionRange": 4,
+                    "mountains": [],
+                    "cells": [],
+                    "construction": [],
+                    "enemy": [],
+                    "plantations": [{"id": "hq-42", "position": [1, 1], "isMain": True, "hp": 97}],
+                    "beavers": [],
+                },
+            },
+        ],
+    )
+    stat = turns_path.stat()
+    os.utime(turns_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    refreshed = session_viewer.load_session(str(session_dir), cell_size=18)
+    assert [frame["turnNo"] for frame in refreshed["frames"]] == [7, 8]
