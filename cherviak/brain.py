@@ -80,6 +80,69 @@ def forward_direction(hq: Position, p: Position) -> tuple[int, int]:
     return (0, sy)
 
 
+def primary_direction(arena: Arena, hq: Plantation) -> tuple[int, int]:
+    """Pick one cardinal direction to commit to for chain expansion.
+
+    Prefer direction from oldest-living plantation to current HQ (chain forward).
+    When the chain has not formed yet, pick whichever cardinal has most room on
+    the map. Falls back to (1, 0) if HQ is on an unusual spot."""
+    non_main = [p for p in arena.plantations if not p.is_main and not p.is_isolated]
+    if non_main:
+        oldest = min(non_main, key=lambda p: p.immunity_until_turn)
+        direction = forward_direction(oldest.position, hq.position)
+        if direction != (0, 0):
+            return direction
+    x, y = hq.position
+    w, h = arena.size
+    room = {
+        (1, 0): w - x - 1,
+        (-1, 0): x,
+        (0, 1): h - y - 1,
+        (0, -1): y,
+    }
+    return max(room, key=lambda d: room[d])
+
+
+def next_bonus_target(
+    arena: Arena,
+    origin: Position,
+    direction: tuple[int, int],
+) -> Optional[Position]:
+    """Closest unclaimed bonus cell (coords multiple of 7) in the given direction."""
+    dx, dy = direction
+    ox, oy = origin
+    w, h = arena.size
+    if w <= 0 or h <= 0:
+        return None
+    plantations = {tuple(p.position) for p in arena.plantations}
+    construction = {tuple(c.position) for c in arena.construction}
+    mountains = {tuple(m) for m in arena.mountains}
+    completed = {
+        tuple(c.position) for c in arena.cells if c.terraformation_progress >= 100
+    }
+    claimed = plantations | construction | completed
+
+    best: Optional[tuple[int, int, Position]] = None
+    for bx in range(0, w, 7):
+        for by in range(0, h, 7):
+            pos = (bx, by)
+            if pos in mountains or pos in claimed:
+                continue
+            px, py = bx - ox, by - oy
+            if dx != 0 and px * dx <= 0:
+                continue
+            if dy != 0 and py * dy <= 0:
+                continue
+            primary = abs(px) if dx != 0 else abs(py)
+            perpendicular = abs(py) if dx != 0 else abs(px)
+            candidate = (primary + perpendicular, perpendicular, [bx, by])
+            if best is None or candidate < best:
+                best = candidate
+    if best is None:
+        return None
+    return best[2]
+
+
 def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
     occupied: set[tuple[int, int]] = set()
     for p in arena.plantations:
@@ -120,7 +183,21 @@ def pick_target(arena: Arena, hq: Plantation) -> Optional[Position]:
     safe = [c for c in neighbors if is_safe(c)]
     if not safe:
         return None
-    return min(safe, key=nearest_bonus_distance)
+
+    direction = primary_direction(arena, hq)
+    bonus = next_bonus_target(arena, hq.position, direction)
+
+    def directional_key(c: Position) -> tuple[int, int, int]:
+        dx, dy = direction
+        projection = (c[0] - hq.position[0]) * dx + (c[1] - hq.position[1]) * dy
+        bonus_dist = (
+            max(abs(c[0] - bonus[0]), abs(c[1] - bonus[1]))
+            if bonus is not None
+            else nearest_bonus_distance(c)
+        )
+        return (-projection, bonus_dist, nearest_bonus_distance(c))
+
+    return min(safe, key=directional_key)
 
 
 def build_commands(arena: Arena, target: Position) -> list[list[Position]]:
@@ -210,7 +287,9 @@ def check_relocate(arena: Arena) -> Optional[list[Position]]:
 
     We relocate aggressively once the HQ cell is close to completion, because
     losing a main plantation on a 95% cell is much more common than losing a
-    branch. Fresh adjacent plantations remain the top priority.
+    branch. Fresh adjacent plantations remain the top priority. Ties break in
+    favor of moving forward along the primary expansion direction so HQ keeps
+    marching onto fresh ground rather than doubling back.
     """
     hq = next((p for p in arena.plantations if p.is_main), None)
     if hq is None:
@@ -221,8 +300,10 @@ def check_relocate(arena: Arena) -> Optional[list[Position]]:
         (cell.position[0], cell.position[1]): cell.terraformation_progress for cell in arena.cells
     }
     hq_progress = cell_progress.get((hq.position[0], hq.position[1]), 0)
+    direction = primary_direction(arena, hq)
+    dx, dy = direction
 
-    candidates: list[tuple[tuple[int, int, int, int], Plantation]] = []
+    candidates: list[tuple[tuple[int, int, int, int, int], Plantation]] = []
     for p in arena.plantations:
         if p.is_main or p.is_isolated:
             continue
@@ -234,11 +315,11 @@ def check_relocate(arena: Arena) -> Optional[list[Position]]:
         if freshness < 2 and hq_progress < HQ_RELOCATE_THRESHOLD:
             continue
         candidate_progress = cell_progress.get((p.position[0], p.position[1]), 0)
-        # Prefer fresh plantations first; once HQ is in danger, prefer the
-        # least-completed neighboring cell so the new HQ survives longer.
+        projection = (p.position[0] - hq.position[0]) * dx + (p.position[1] - hq.position[1]) * dy
         priority = (
             0 if freshness >= 2 else 1,
             candidate_progress,
+            -projection,
             -freshness,
             -p.hp,
         )

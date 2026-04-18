@@ -346,6 +346,84 @@ def test_pick_upgrade_returns_empty_when_all_known_maxed():
     assert pick_upgrade(arena) == ""
 
 
+from cherviak.brain import next_bonus_target, primary_direction
+
+
+def test_primary_direction_uses_chain_when_available():
+    hq = make_plant([10, 5], is_main=True, immunity=100, pid="hq")
+    old = make_plant([5, 5], immunity=3, pid="old")
+    newer = make_plant([8, 5], immunity=50, pid="newer")
+    arena = make_arena(plantations=[hq, old, newer])
+    assert primary_direction(arena, arena.plantations[0]) == (1, 0)
+
+
+def test_primary_direction_falls_back_to_room_when_no_chain():
+    hq = make_plant([3, 50], is_main=True, pid="hq")
+    arena = make_arena(plantations=[hq])
+    # 100x100 map. HQ at x=3: room +X=96, -X=3, +Y=49, -Y=50
+    assert primary_direction(arena, arena.plantations[0]) == (1, 0)
+
+
+def test_primary_direction_y_axis_chain():
+    hq = make_plant([5, 12], is_main=True, pid="hq")
+    old = make_plant([5, 5], immunity=3, pid="old")
+    arena = make_arena(plantations=[hq, old])
+    assert primary_direction(arena, arena.plantations[0]) == (0, 1)
+
+
+def test_next_bonus_target_picks_closest_in_direction():
+    hq = make_plant([3, 0], is_main=True, pid="hq")
+    arena = make_arena(plantations=[hq])
+    # direction (1, 0), from origin (3,0), bonuses at (7,0), (7,7), (14,0)...
+    # closest in +X with minimal perpendicular: (7, 0)
+    target = next_bonus_target(arena, [3, 0], (1, 0))
+    assert target == [7, 0]
+
+
+def test_next_bonus_target_skips_claimed_bonus():
+    hq = make_plant([3, 0], is_main=True, pid="hq")
+    already = make_plant([7, 0], immunity=5, pid="p2")
+    arena = make_arena(plantations=[hq, already])
+    target = next_bonus_target(arena, [3, 0], (1, 0))
+    # (7,0) is ours → skip; next: (14, 0) at primary=11, perp=0,
+    # or (7,7) which has px=4 forward + perp=7 = 11 — perp=0 wins tie
+    assert target == [14, 0]
+
+
+def test_next_bonus_target_skips_mountains():
+    hq = make_plant([3, 0], is_main=True, pid="hq")
+    arena = make_arena(plantations=[hq], mountains=[[7, 0]])
+    target = next_bonus_target(arena, [3, 0], (1, 0))
+    # (7, 0) blocked, pick (14, 0) — same primary projection filter logic
+    assert target == [14, 0]
+
+
+def test_next_bonus_target_returns_none_when_no_bonus_ahead():
+    hq = make_plant([95, 0], is_main=True, pid="hq")
+    arena = make_arena(plantations=[hq])
+    # 100x100 map: bonuses at multiples of 7 up to 98
+    target = next_bonus_target(arena, [95, 0], (1, 0))
+    # 98 is the last multiple of 7 < 100: px=3 > 0, by=0
+    assert target == [98, 0]
+
+
+def test_next_bonus_target_none_beyond_last_bonus():
+    hq = make_plant([99, 0], is_main=True, pid="hq")
+    arena = make_arena(plantations=[hq])
+    target = next_bonus_target(arena, [99, 0], (1, 0))
+    assert target is None
+
+
+def test_pick_target_commits_to_primary_direction():
+    hq = make_plant([10, 5], is_main=True, immunity=100, pid="hq")
+    old = make_plant([5, 5], immunity=3, pid="old")
+    # chain pointing +X; safe neighbors of HQ: [11,5], [10,6], [10,4]
+    # [9,5] is blocked by `old`. Forward direction: +X. Pick [11, 5].
+    arena = make_arena(plantations=[hq, old])
+    target = pick_target(arena, arena.plantations[0])
+    assert target == [11, 5]
+
+
 from cherviak.brain import forward_direction
 
 
