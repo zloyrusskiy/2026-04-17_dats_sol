@@ -55,6 +55,7 @@ def test_get_arena_logs_turn_number(caplog: pytest.LogCaptureFixture, monkeypatc
     assert "GET /api/arena status=200" in caplog.text
     assert "http=HTTP/1.1" in caplog.text
     assert "turnNo=533" in caplog.text
+    assert '== GET /api/arena raw={"turnNo":533,"nextTurnIn":1.0' in caplog.text
 
 
 def test_client_enables_keepalive_and_http2(monkeypatch: pytest.MonkeyPatch):

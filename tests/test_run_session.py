@@ -1,17 +1,17 @@
 import logging
+from pathlib import Path
 
+import anyio
 import httpx
 
 from scripts.run_session import (
     ARENA_WARMUP_SAMPLES,
     MIN_POLL_SLEEP,
-    TURN_BOUNDARY_MARGIN,
     compute_arena_sleep,
     effective_latency,
     configure_logging,
-    compute_logs_backoff_seconds,
-    compute_retry_after_seconds,
     describe_command_status,
+    fetch_arena_once,
     summarize_construction,
     summarize_decision,
     summarize_response_errors,
@@ -21,20 +21,11 @@ from scripts.run_session import (
 from cherviak.models import Arena
 
 
-def make_status_error(status_code: int, headers: dict[str, str] | None = None) -> httpx.HTTPStatusError:
-    request = httpx.Request("GET", "https://example.test/api/logs")
-    response = httpx.Response(status_code, headers=headers, request=request)
-    return httpx.HTTPStatusError("boom", request=request, response=response)
-
-
-def test_compute_logs_backoff_uses_retry_after_header():
-    exc = make_status_error(429, headers={"Retry-After": "7"})
-    assert compute_logs_backoff_seconds(exc, default=5.0) == 7.0
-
-
-def test_compute_logs_backoff_falls_back_to_default():
-    exc = make_status_error(429)
-    assert compute_logs_backoff_seconds(exc, default=5.0) == 5.0
+class FailingArenaClient:
+    def get_arena(self):
+        request = httpx.Request("GET", "https://example.test/api/arena")
+        response = httpx.Response(503, text="unavailable", request=request)
+        raise httpx.HTTPStatusError("boom", request=request, response=response)
 
 
 def test_update_latency_estimate_initializes_from_first_sample():
@@ -64,10 +55,10 @@ def test_warmup_complete_requires_three_samples():
     assert warmup_complete(ARENA_WARMUP_SAMPLES) is True
 
 
-def test_compute_arena_sleep_uses_half_latency_and_boundary_margin():
+def test_compute_arena_sleep_uses_half_latency():
     sleep_for = compute_arena_sleep(next_turn_in=0.95, latency=0.06)
 
-    assert round(sleep_for, 3) == round(0.95 - 0.03 - TURN_BOUNDARY_MARGIN, 3)
+    assert round(sleep_for, 3) == round(0.95 - 0.03, 3)
 
 
 def test_compute_arena_sleep_respects_min_poll_sleep():
@@ -76,18 +67,13 @@ def test_compute_arena_sleep_respects_min_poll_sleep():
     assert sleep_for == MIN_POLL_SLEEP
 
 
-def test_compute_retry_after_seconds_uses_default_floor():
-    exc = make_status_error(429, headers={"Retry-After": "0.2"})
-    assert compute_retry_after_seconds(exc, default=1.0) == 1.0
+def test_fetch_arena_once_logs_error_and_returns_none(tmp_path: Path):
+    result = anyio.run(fetch_arena_once, FailingArenaClient(), tmp_path / "turns.jsonl")
 
-
-def test_describe_command_status_marks_backoff():
-    status = describe_command_status(
-        {"command": [{"path": [[1, 1], [1, 1], [1, 2]]}]},
-        submit_enabled=True,
-        response={"skipped": "rate_limit_backoff", "retryInSeconds": 1.5},
-    )
-    assert status == "rate_limit_backoff"
+    assert result is None
+    payload = (tmp_path / "turns.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "http_error"' in payload
+    assert '"statusCode": 503' in payload
 
 
 def test_describe_command_status_marks_server_side_errors():

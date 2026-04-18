@@ -1,5 +1,6 @@
 import logging
 import time
+from json import dumps
 from importlib.util import find_spec
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -119,15 +120,25 @@ class GameClient:
             self._log_request_finish(method, path, started_at, error=exc)
             raise
 
+    def _format_arena_response_details(self, response: httpx.Response) -> str:
+        payload = response.json()
+        details = (
+            f"http={response.http_version} "
+            f"turnNo={payload.get('turnNo')} "
+            f"nextTurnIn={payload.get('nextTurnIn')}"
+        )
+        logger.debug(
+            "%s == GET /api/arena raw=%s",
+            self._timestamp(),
+            dumps(payload, ensure_ascii=True, separators=(",", ":")),
+        )
+        return details
+
     def get_arena(self) -> Arena:
         r = self._request(
             "GET",
             "/api/arena",
-            response_details=lambda response: (
-                f"http={response.http_version} "
-                f"turnNo={response.json().get('turnNo')} "
-                f"nextTurnIn={response.json().get('nextTurnIn')}"
-            ),
+            response_details=self._format_arena_response_details,
         )
         r.raise_for_status()
         return Arena.model_validate(r.json())

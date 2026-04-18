@@ -37,7 +37,6 @@ MIN_POLL_SLEEP = 0.02
 LATENCY_ALPHA = 0.2
 LATENCY_JITTER_ALPHA = 0.2
 ARENA_WARMUP_SAMPLES = 3
-TURN_BOUNDARY_MARGIN = 0.03
 
 
 def available_strategy_names() -> list[str]:
@@ -125,19 +124,6 @@ def write_meta(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def compute_retry_after_seconds(exc: httpx.HTTPStatusError, default: float) -> float:
-    retry_after = exc.response.headers.get("Retry-After", "").strip()
-    try:
-        retry_after_seconds = float(retry_after)
-    except ValueError:
-        retry_after_seconds = 0.0
-    return max(default, retry_after_seconds)
-
-
-def compute_logs_backoff_seconds(exc: httpx.HTTPStatusError, default: float) -> float:
-    return compute_retry_after_seconds(exc, default)
-
-
 def update_latency_estimate(
     state: dict[str, float],
     observed_latency: float,
@@ -169,7 +155,7 @@ def warmup_complete(sample_count: int) -> bool:
 
 
 def compute_arena_sleep(next_turn_in: float, latency: float) -> float:
-    return max(MIN_POLL_SLEEP, next_turn_in - latency / 2.0 - TURN_BOUNDARY_MARGIN)
+    return max(MIN_POLL_SLEEP, next_turn_in - latency / 2)
 
 
 def describe_command_status(
@@ -183,8 +169,6 @@ def describe_command_status(
         return "planned"
     if not isinstance(response, dict):
         return "failed"
-    if response.get("skipped"):
-        return str(response["skipped"])
     status_code = response.get("statusCode")
     if status_code is not None:
         return f"http_{status_code}"
@@ -261,35 +245,33 @@ async def fetch_arena(client: GameClient) -> tuple[Any, float]:
     return arena, time.monotonic() - t_send
 
 
-async def safe_fetch_arena(
+async def fetch_arena_once(
     client: GameClient,
     turns_path: Path,
-    idle_sleep: float,
-) -> tuple[Any, float]:
-    """Fetch arena with automatic backoff on transport/HTTP errors."""
-    while True:
-        try:
-            return await fetch_arena(client)
-        except httpx.HTTPStatusError as exc:
-            append_jsonl(
-                turns_path,
-                {
-                    "capturedAt": utc_now(),
-                    "kind": "http_error",
-                    "statusCode": exc.response.status_code,
-                    "body": exc.response.text,
-                },
-            )
-        except httpx.HTTPError as exc:
-            append_jsonl(
-                turns_path,
-                {
-                    "capturedAt": utc_now(),
-                    "kind": "network_error",
-                    "error": str(exc),
-                },
-            )
-        await asyncio.sleep(idle_sleep)
+) -> tuple[Any, float] | None:
+    """Attempt a single GET /api/arena and log any transport/HTTP failure."""
+    try:
+        return await fetch_arena(client)
+    except httpx.HTTPStatusError as exc:
+        append_jsonl(
+            turns_path,
+            {
+                "capturedAt": utc_now(),
+                "kind": "http_error",
+                "statusCode": exc.response.status_code,
+                "body": exc.response.text,
+            },
+        )
+    except httpx.HTTPError as exc:
+        append_jsonl(
+            turns_path,
+            {
+                "capturedAt": utc_now(),
+                "kind": "network_error",
+                "error": str(exc),
+            },
+        )
+    return None
 
 
 async def decide_and_submit(
@@ -298,7 +280,6 @@ async def decide_and_submit(
     arena: Any,
     args: argparse.Namespace,
     turns_path: Path,
-    command_state: dict[str, float],
 ) -> None:
     """Compute the strategy's decision and POST the command.
 
@@ -311,33 +292,16 @@ async def decide_and_submit(
 
     response: dict[str, Any] | None = None
     if args.submit and command:
-        submit_now = time.monotonic()
-        if submit_now < command_state["backoff_until"]:
+        try:
+            response = await asyncio.to_thread(client.post_command, command)
+        except httpx.HTTPStatusError as exc:
             response = {
-                "skipped": "rate_limit_backoff",
-                "retryInSeconds": round(command_state["backoff_until"] - submit_now, 3),
+                "error": str(exc),
+                "statusCode": exc.response.status_code,
+                "body": exc.response.text,
             }
-        else:
-            try:
-                response = await asyncio.to_thread(client.post_command, command)
-                command_state["backoff_until"] = 0.0
-            except httpx.HTTPStatusError as exc:
-                response = {
-                    "error": str(exc),
-                    "statusCode": exc.response.status_code,
-                    "body": exc.response.text,
-                }
-                if exc.response.status_code == 429:
-                    backoff_seconds = compute_retry_after_seconds(exc, default=1.0)
-                    command_state["backoff_until"] = time.monotonic() + backoff_seconds
-                    response["retryInSeconds"] = backoff_seconds
-                    logging.warning(
-                        "turn=%s command rate-limited; backoff %.2f s",
-                        arena.turn_no,
-                        backoff_seconds,
-                    )
-            except httpx.HTTPError as exc:
-                response = {"error": str(exc)}
+        except httpx.HTTPError as exc:
+            response = {"error": str(exc)}
 
     strategy.on_turn_result(arena, command, response)
     command_status = describe_command_status(command, args.submit, response)
@@ -378,20 +342,8 @@ async def logs_loop(
 ) -> None:
     """Standalone coroutine polling /api/logs independently of game ticks."""
     seen_log_keys: set[tuple[str, str]] = set()
-    backoff_until = 0.0
     with GameClient(config, log_requests=False) as client:
         while not stop_event.is_set():
-            now = time.monotonic()
-            if now < backoff_until:
-                try:
-                    await asyncio.wait_for(
-                        stop_event.wait(),
-                        timeout=min(backoff_until - now, 1.0),
-                    )
-                    return
-                except asyncio.TimeoutError:
-                    continue
-
             try:
                 logs = await asyncio.to_thread(client.get_logs)
             except httpx.HTTPStatusError as exc:
@@ -404,10 +356,6 @@ async def logs_loop(
                         "body": exc.response.text,
                     },
                 )
-                if exc.response.status_code == 429:
-                    backoff_until = time.monotonic() + compute_logs_backoff_seconds(
-                        exc, default=max(interval, 5.0)
-                    )
             except httpx.HTTPError as exc:
                 append_jsonl(
                     logs_path,
@@ -457,13 +405,16 @@ async def play_loop(
     last_turn_no: int | None = None
     active_round = False
     active_round_samples = 0
-    command_state: dict[str, float] = {"backoff_until": 0.0}
     decision_task: asyncio.Task | None = None
     latency_state: dict[str, float] = {}
 
-    arena, rtt = await safe_fetch_arena(client, turns_path, args.idle_sleep)
-
     while True:
+        arena_sample = await fetch_arena_once(client, turns_path)
+        if arena_sample is None:
+            await asyncio.sleep(args.idle_sleep)
+            continue
+
+        arena, rtt = arena_sample
         observed_latency = rtt / 2.0
         mean_latency, jitter = update_latency_estimate(latency_state, observed_latency)
         latency = effective_latency(mean_latency, jitter)
@@ -482,7 +433,6 @@ async def play_loop(
             active_round_samples = 0
             last_turn_no = None
             await asyncio.sleep(args.idle_sleep)
-            arena, rtt = await safe_fetch_arena(client, turns_path, args.idle_sleep)
             continue
 
         if not active_round:
@@ -526,15 +476,12 @@ async def play_loop(
                 )
             else:
                 decision_task = asyncio.create_task(
-                    decide_and_submit(
-                        strategy, client, arena, args, turns_path, command_state
-                    )
+                    decide_and_submit(strategy, client, arena, args, turns_path)
                 )
             last_turn_no = arena.turn_no
 
         sleep_for = compute_arena_sleep(arena.next_turn_in, latency)
         await asyncio.sleep(sleep_for)
-        arena, rtt = await safe_fetch_arena(client, turns_path, args.idle_sleep)
 
 
 async def main_async() -> int:
