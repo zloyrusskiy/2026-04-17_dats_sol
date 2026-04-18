@@ -110,7 +110,9 @@ venv/bin/python scripts/session_viewer.py --cell-size 24
 - на один `turnNo` — не более одной команды
 - после принятия решения/отправки команды цикл спит `max(0, POLL_INTERVAL - elapsed)` до следующего тика
 - никаких ретраев: все ошибки просто логируются
-- сессия уникальна по `id` плантации с `isMain: true` — директория `artifacts/sessions/session_<hqId>/`
+- сессия определяется по непрерывности HQ: пока арена активна, HQ не пропал надолго и его позиция меняется только допустимым `relocateMain`
+- `hqId` сохраняется в артефактах только как диагностическое поле и не разрезает сессии
+- директория сессии создаётся по времени старта и начальному положению HQ
 
 Как этим управлять:
 - для безопасного dry-run запускай без `--submit`
@@ -129,9 +131,9 @@ venv/bin/python scripts/run_session.py --strategy passive --submit
 venv/bin/python scripts/run_session.py --strategy lateral --submit
 ```
 
-Что пишет (в `artifacts/sessions/session_<hqId>/`):
-- `meta.json` — параметры сессии (`hqId`, `strategy`, `submit`, `latencyAvg`, `startedAt`)
-- `turns.jsonl` — события `round_started`, `turn`, `skip`, `round_finished`, `http_error`, `network_error`
+Что пишет (в `artifacts/sessions/session_<timestamp>_<seq>_<x>_<y>/`):
+- `meta.json` — параметры сессии (`hqId`, `initialHqId`, `initialHqPosition`, `strategy`, `submit`, `latencyAvg`, `startedAt`)
+- `turns.jsonl` — события `round_started`, `turn`, `skip`, `round_finished`, `hq_relocated`, `hq_identity_changed`, `hq_missing`, `arena_inactive`, `http_error`, `network_error`
 - `logs.jsonl` — склеенные записи `/api/logs` сервера
 
 ## Анализ игровых логов

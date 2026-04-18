@@ -7,7 +7,8 @@ Loop model:
     отправляли команду — принимаем решение и POST /api/command.
   * Один turnNo = не более одной команды.
   * Никаких ретраев: ошибки просто логируются.
-  * Сессия уникальна по id плантации с isMain: true.
+  * Сессия живёт, пока HQ не исчезнет надолго или не появится заново слишком далеко.
+  * `hqId` записывается только для диагностики и не управляет границей сессии.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ from cherviak.strategies import LateralStrategy, PassiveStrategy
 
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/sessions")
+ARENA_INACTIVE_GRACE_TICKS = 3
+HQ_MISSING_GRACE_TICKS = 3
 STRATEGIES = {
     PassiveStrategy.name: PassiveStrategy,
     LateralStrategy.name: LateralStrategy,
@@ -87,6 +90,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def utc_now_slug() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+
 def serialize(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(by_alias=True)
@@ -117,9 +124,22 @@ def find_hq_id(arena: Any) -> str | None:
     return None
 
 
+def find_hq_position(arena: Any) -> list[int] | None:
+    for plantation in arena.plantations:
+        if plantation.is_main:
+            return list(plantation.position)
+    return None
+
+
+def is_relocate_position(previous_position: list[int], current_position: list[int]) -> bool:
+    dx = abs(previous_position[0] - current_position[0])
+    dy = abs(previous_position[1] - current_position[1])
+    return (dx == 0 and dy == 0) or (dx == 1 and dy == 0) or (dx == 0 and dy == 1)
+
+
 @dataclass
 class SessionWriter:
-    """Создаёт session_<hqId>/ когда видит HQ, пишет turns.jsonl и logs.jsonl."""
+    """Создаёт time-based session dir и пишет turns.jsonl/logs.jsonl."""
 
     root: Path
     strategy_name: str
@@ -127,17 +147,35 @@ class SessionWriter:
     latency_avg: float
     poll_interval: float
     base_url: str
-    hq_id: str | None = None
+    session_index: int = 0
+    initial_hq_id: str | None = None
+    current_hq_id: str | None = None
+    initial_hq_position: list[int] | None = None
+    current_hq_position: list[int] | None = None
     session_dir: Path | None = None
     turns_path: Path | None = None
     logs_path: Path | None = None
 
-    def ensure_for_hq(self, hq_id: str) -> bool:
-        """Switch to session dir for the given HQ id. Returns True if it changed."""
-        if self.hq_id == hq_id:
+    def _allocate_session_dir(self, hq_position: list[int]) -> Path:
+        suffix = utc_now_slug()
+        x, y = hq_position
+        self.session_index += 1
+        candidate = self.root / f"session_{suffix}_{self.session_index:03d}_{x}_{y}"
+        serial = 1
+        while candidate.exists():
+            serial += 1
+            candidate = self.root / f"session_{suffix}_{self.session_index:03d}_{x}_{y}_{serial}"
+        return candidate
+
+    def open_round(self, hq_id: str, hq_position: list[int]) -> bool:
+        """Open a new session dir for the round. Returns True if it was opened."""
+        if self.session_dir is not None:
             return False
-        self.hq_id = hq_id
-        session_dir = self.root / f"session_{hq_id}"
+        self.initial_hq_id = hq_id
+        self.current_hq_id = hq_id
+        self.initial_hq_position = list(hq_position)
+        self.current_hq_position = list(hq_position)
+        session_dir = self._allocate_session_dir(hq_position)
         session_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir = session_dir
         self.turns_path = session_dir / "turns.jsonl"
@@ -147,6 +185,8 @@ class SessionWriter:
             meta = {
                 "startedAt": utc_now(),
                 "hqId": hq_id,
+                "initialHqId": hq_id,
+                "initialHqPosition": hq_position,
                 "strategy": self.strategy_name,
                 "submit": self.submit,
                 "baseUrl": self.base_url,
@@ -158,6 +198,32 @@ class SessionWriter:
                 encoding="utf-8",
             )
         return True
+
+    def note_hq(
+        self,
+        hq_id: str,
+        hq_position: list[int],
+    ) -> tuple[bool, bool, str | None, list[int] | None]:
+        """Update current HQ state inside the active round."""
+        previous_hq_id = self.current_hq_id
+        previous_hq_position = self.current_hq_position
+        self.current_hq_id = hq_id
+        self.current_hq_position = list(hq_position)
+        return (
+            previous_hq_id != hq_id,
+            previous_hq_position != hq_position,
+            previous_hq_id,
+            previous_hq_position,
+        )
+
+    def close_round(self) -> None:
+        self.initial_hq_id = None
+        self.current_hq_id = None
+        self.initial_hq_position = None
+        self.current_hq_position = None
+        self.session_dir = None
+        self.turns_path = None
+        self.logs_path = None
 
 
 def describe_command_status(
@@ -369,6 +435,8 @@ async def play_loop(
     """Главный игровой цикл. Тик длится poll_interval секунд."""
     last_submitted_turn: int | None = None
     active_round = False
+    inactive_arena_ticks = 0
+    missing_hq_ticks = 0
 
     while True:
         tick_started = time.perf_counter()
@@ -408,6 +476,24 @@ async def play_loop(
             continue
 
         if not looks_like_active_arena(arena):
+            inactive_arena_ticks += 1
+            if active_round and session_writer.turns_path is not None:
+                logging.info(
+                    "arena inactive tick=%s/%s — waiting before finishing round",
+                    inactive_arena_ticks,
+                    ARENA_INACTIVE_GRACE_TICKS,
+                )
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "arena_inactive",
+                        "ticks": inactive_arena_ticks,
+                    },
+                )
+            if inactive_arena_ticks < ARENA_INACTIVE_GRACE_TICKS:
+                await _sleep_remaining(tick_started, poll_interval)
+                continue
             if active_round and session_writer.turns_path is not None:
                 append_jsonl(
                     session_writer.turns_path,
@@ -415,26 +501,64 @@ async def play_loop(
                         "capturedAt": utc_now(),
                         "kind": "round_finished",
                         "lastTurnNo": last_submitted_turn,
+                        "reason": "arena_inactive",
                     },
                 )
                 logging.info("round finished (last turn %s)", last_submitted_turn)
             active_round = False
             last_submitted_turn = None
+            inactive_arena_ticks = 0
+            missing_hq_ticks = 0
+            session_writer.close_round()
             await _sleep_remaining(tick_started, poll_interval)
             continue
+        inactive_arena_ticks = 0
 
         hq_id = find_hq_id(arena)
+        hq_position = find_hq_position(arena)
         if hq_id is None:
+            missing_hq_ticks += 1
             logging.info(
-                "turn=%s nextTurnIn=%.3f no HQ plantation — waiting",
+                "turn=%s nextTurnIn=%.3f no HQ plantation tick=%s/%s — waiting",
                 arena.turn_no,
                 arena.next_turn_in,
+                missing_hq_ticks,
+                HQ_MISSING_GRACE_TICKS,
             )
+            if active_round and session_writer.turns_path is not None:
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "hq_missing",
+                        "turnNo": arena.turn_no,
+                        "nextTurnIn": arena.next_turn_in,
+                        "ticks": missing_hq_ticks,
+                    },
+                )
+            if active_round and missing_hq_ticks >= HQ_MISSING_GRACE_TICKS:
+                if session_writer.turns_path is not None:
+                    append_jsonl(
+                        session_writer.turns_path,
+                        {
+                            "capturedAt": utc_now(),
+                            "kind": "round_finished",
+                            "lastTurnNo": last_submitted_turn,
+                            "reason": "hq_missing",
+                        },
+                    )
+                logging.info("round finished after HQ missing for %s ticks", missing_hq_ticks)
+                active_round = False
+                last_submitted_turn = None
+                session_writer.close_round()
             await _sleep_remaining(tick_started, poll_interval)
             continue
+        missing_hq_ticks = 0
 
-        switched = session_writer.ensure_for_hq(hq_id)
-        if switched:
+        if not active_round:
+            opened = session_writer.open_round(hq_id, hq_position)
+            if not opened:
+                logging.warning("active round has no session dir for hqId=%s", hq_id)
             logging.info(
                 "session opened: hqId=%s dir=%s",
                 hq_id,
@@ -453,9 +577,97 @@ async def play_loop(
             )
             active_round = True
             last_submitted_turn = None
-
-        if not active_round:
-            active_round = True
+        else:
+            previous_hq_position = session_writer.current_hq_position
+            if (
+                previous_hq_position is not None
+                and hq_position is not None
+                and not is_relocate_position(previous_hq_position, hq_position)
+            ):
+                if session_writer.turns_path is not None:
+                    append_jsonl(
+                        session_writer.turns_path,
+                        {
+                            "capturedAt": utc_now(),
+                            "kind": "round_finished",
+                            "lastTurnNo": last_submitted_turn,
+                            "reason": "hq_jump",
+                            "previousHqPosition": previous_hq_position,
+                            "hqPosition": hq_position,
+                            "turnNo": arena.turn_no,
+                        },
+                    )
+                logging.info(
+                    "hq jumped: %s -> %s, starting new session",
+                    previous_hq_position,
+                    hq_position,
+                )
+                active_round = False
+                last_submitted_turn = None
+                session_writer.close_round()
+                opened = session_writer.open_round(hq_id, hq_position)
+                if not opened:
+                    logging.warning("failed to open new session after HQ jump for hqId=%s", hq_id)
+                logging.info(
+                    "session opened: hqId=%s dir=%s",
+                    hq_id,
+                    session_writer.session_dir,
+                )
+                strategy.on_round_started()
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "round_started",
+                        "hqId": hq_id,
+                        "turnNo": arena.turn_no,
+                        "arena": serialize(arena),
+                        "reason": "hq_jump",
+                    },
+                )
+                active_round = True
+            id_changed, position_changed, previous_hq_id, previous_hq_position = session_writer.note_hq(
+                hq_id,
+                hq_position,
+            )
+            if position_changed and previous_hq_position is not None and session_writer.turns_path is not None:
+                logging.info(
+                    "hq relocated: %s -> %s within session dir=%s",
+                    previous_hq_position,
+                    hq_position,
+                    session_writer.session_dir,
+                )
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "hq_relocated",
+                        "previousHqId": previous_hq_id,
+                        "hqId": hq_id,
+                        "previousHqPosition": previous_hq_position,
+                        "hqPosition": hq_position,
+                        "turnNo": arena.turn_no,
+                        "arena": serialize(arena),
+                    },
+                )
+            elif id_changed and session_writer.turns_path is not None:
+                logging.info(
+                    "hq identity changed: %s -> %s within session dir=%s",
+                    previous_hq_id,
+                    hq_id,
+                    session_writer.session_dir,
+                )
+                append_jsonl(
+                    session_writer.turns_path,
+                    {
+                        "capturedAt": utc_now(),
+                        "kind": "hq_identity_changed",
+                        "previousHqId": previous_hq_id,
+                        "hqId": hq_id,
+                        "turnNo": arena.turn_no,
+                        "arena": serialize(arena),
+                    },
+                )
 
         if arena.next_turn_in <= latency_avg:
             logging.info(

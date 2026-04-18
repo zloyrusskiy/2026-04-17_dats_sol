@@ -8,6 +8,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from html import escape
 from http import HTTPStatus
@@ -93,6 +94,15 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def session_dir_created_ts(session_path: Path) -> float:
+    stat = session_path.stat()
+    return getattr(stat, "st_birthtime", stat.st_mtime)
+
+
+def isoformat_utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
 def summarize_session(session_path: Path) -> dict[str, Any]:
     meta_path = session_path / "meta.json"
     turns_path = session_path / "turns.jsonl"
@@ -125,10 +135,13 @@ def summarize_session(session_path: Path) -> dict[str, Any]:
             for raw_line in handle:
                 if raw_line.strip():
                     log_count += 1
+    created_ts = session_dir_created_ts(session_path)
 
     return {
         "id": session_path.name,
         "label": session_path.name,
+        "createdAt": isoformat_utc(created_ts),
+        "createdTs": created_ts,
         "startedAt": meta.get("startedAt"),
         "strategy": meta.get("strategy"),
         "hqId": meta.get("hqId"),
@@ -510,12 +523,13 @@ def list_sessions(sessions_dir: Path) -> list[dict[str, Any]]:
     if not sessions_dir.exists():
         return sessions
 
-    for session_dir in sorted(sessions_dir.iterdir(), reverse=True):
+    for session_dir in sessions_dir.iterdir():
         if not session_dir.is_dir():
             continue
         if not (session_dir / "turns.jsonl").exists():
             continue
         sessions.append(summarize_session(session_dir.resolve()))
+    sessions.sort(key=lambda session: (session["createdTs"], session["id"]), reverse=True)
     return sessions
 
 
@@ -921,6 +935,8 @@ def render_index_html() -> str:
     let dragging = false;
     let dragStartX = 0;
     let dragStartY = 0;
+    const ZOOM_FACTOR = 1.15;
+    const DEFAULT_ZOOM_IN_STEPS = 8;
 
     function getAxisConfig(svg) {
       if (!svg) return null;
@@ -976,7 +992,7 @@ def render_index_html() -> str:
       renderStickyAxes();
     }
 
-    function fitView() {
+    function fitView(scaleMultiplier = 1) {
       const svg = contentEl.querySelector('svg');
       if (!svg) {
         scale = 1;
@@ -993,9 +1009,15 @@ def render_index_html() -> str:
         Math.max(availableWidth, availableHeight) / Math.max(vb.width, vb.height),
         1
       );
+      scale = Math.max(0.08, Math.min(scale * scaleMultiplier, 10));
       translateX = (viewerEl.clientWidth - vb.width * scale) / 2;
       translateY = (viewerEl.clientHeight - vb.height * scale) / 2;
       applyTransform();
+    }
+
+    function resetViewport() {
+      fitView(ZOOM_FACTOR ** DEFAULT_ZOOM_IN_STEPS);
+      centerOnHq();
     }
 
     function centerOnHq() {
@@ -1127,6 +1149,12 @@ def render_index_html() -> str:
     async function loadSessions() {
       const response = await fetch('/api/sessions');
       sessions = await response.json();
+      sessions.sort((a, b) => {
+        const aTs = Number(a.createdTs || 0);
+        const bTs = Number(b.createdTs || 0);
+        if (aTs !== bTs) return bTs - aTs;
+        return String(b.id || '').localeCompare(String(a.id || ''));
+      });
       renderSessionButtons();
       if (sessions.length > 0) {
         const latestSession = sessions[0];
@@ -1145,7 +1173,8 @@ def render_index_html() -> str:
         `${currentSession.path} | strategy: ${currentSession.meta.strategy || '?'} | logs: ${currentSession.logCount}`;
       markActiveSession(sessionId);
       setSidebarCollapsed(true);
-      renderFrame(0, false);
+      renderFrame(0, true);
+      resetViewport();
     }
 
     function nextFrame() {
@@ -1171,8 +1200,8 @@ def render_index_html() -> str:
     document.getElementById('prevBtn').addEventListener('click', () => prevFrame());
     document.getElementById('nextBtn').addEventListener('click', () => nextFrame());
     document.getElementById('playBtn').addEventListener('click', () => togglePlayback());
-    document.getElementById('zoomInBtn').addEventListener('click', () => { scale *= 1.15; applyTransform(); });
-    document.getElementById('zoomOutBtn').addEventListener('click', () => { scale /= 1.15; applyTransform(); });
+    document.getElementById('zoomInBtn').addEventListener('click', () => { scale *= ZOOM_FACTOR; applyTransform(); });
+    document.getElementById('zoomOutBtn').addEventListener('click', () => { scale /= ZOOM_FACTOR; applyTransform(); });
     document.getElementById('centerHqBtn').addEventListener('click', () => centerOnHq());
     document.getElementById('fitBtn').addEventListener('click', () => fitView());
     openSidebarBtn.addEventListener('click', () => setSidebarCollapsed(false));

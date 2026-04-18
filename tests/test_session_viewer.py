@@ -39,16 +39,50 @@ def test_list_sessions_uses_lightweight_summary(tmp_path, monkeypatch):
         "load_session",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("full session load is not expected")),
     )
+    monkeypatch.setattr(
+        session_viewer,
+        "session_dir_created_ts",
+        lambda path: {older.resolve(): 100.0, latest.resolve(): 200.0}[path],
+    )
 
     sessions = session_viewer.list_sessions(tmp_path)
 
     assert [session["id"] for session in sessions] == [latest.name, older.name]
+    assert sessions[0]["createdTs"] == 200.0
     assert sessions[0]["frameCount"] == 2
     assert sessions[0]["firstTurn"] == 10
     assert sessions[0]["lastTurn"] == 11
     assert sessions[0]["logCount"] == 2
     assert sessions[0]["hqId"] == "hq-new"
     assert sessions[0]["latencyAvg"] == 0.15
+
+
+def test_list_sessions_prefers_folder_creation_time_over_started_at(tmp_path, monkeypatch):
+    newer_meta = tmp_path / "session_meta_newer"
+    newer_dir = tmp_path / "session_dir_newer"
+    newer_meta.mkdir()
+    newer_dir.mkdir()
+
+    write_json(
+        newer_meta / "meta.json",
+        {"startedAt": "2026-04-17T12:00:00Z", "strategy": "passive", "hqId": "hq-meta"},
+    )
+    write_json(
+        newer_dir / "meta.json",
+        {"startedAt": "2026-04-17T10:00:00Z", "strategy": "lateral", "hqId": "hq-dir"},
+    )
+    write_jsonl(newer_meta / "turns.jsonl", [{"kind": "turn", "turnNo": 2}])
+    write_jsonl(newer_dir / "turns.jsonl", [{"kind": "turn", "turnNo": 3}])
+
+    monkeypatch.setattr(
+        session_viewer,
+        "session_dir_created_ts",
+        lambda path: {newer_meta.resolve(): 100.0, newer_dir.resolve(): 200.0}[path],
+    )
+
+    sessions = session_viewer.list_sessions(tmp_path)
+
+    assert [session["id"] for session in sessions] == [newer_dir.name, newer_meta.name]
 
 
 def test_load_session_exposes_html_legend_separately(tmp_path):

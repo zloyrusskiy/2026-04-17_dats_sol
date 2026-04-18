@@ -5,10 +5,14 @@ from pathlib import Path
 import pytest
 
 from scripts.run_session import (
+    ARENA_INACTIVE_GRACE_TICKS,
+    HQ_MISSING_GRACE_TICKS,
     SessionWriter,
     configure_logging,
     describe_command_status,
     find_hq_id,
+    find_hq_position,
+    is_relocate_position,
     looks_like_active_arena,
     summarize_construction,
     summarize_decision,
@@ -69,6 +73,19 @@ def test_find_hq_id_returns_none_when_no_main():
     assert find_hq_id(arena) is None
 
 
+def test_find_hq_position_returns_main_position():
+    arena = _make_arena(plantations=[_hq("hq-1", pos=(10, 11))])
+    assert find_hq_position(arena) == [10, 11]
+
+
+def test_is_relocate_position_accepts_only_cardinal_single_step():
+    assert is_relocate_position([10, 10], [10, 10]) is True
+    assert is_relocate_position([10, 10], [11, 10]) is True
+    assert is_relocate_position([10, 10], [10, 9]) is True
+    assert is_relocate_position([10, 10], [11, 11]) is False
+    assert is_relocate_position([10, 10], [12, 10]) is False
+
+
 def test_looks_like_active_arena_rejects_zero_size():
     assert looks_like_active_arena(_make_arena(size=(0, 0))) is False
     assert looks_like_active_arena(_make_arena(size=(100, 100))) is True
@@ -83,15 +100,21 @@ def test_session_writer_creates_session_dir_and_meta_on_first_hq(tmp_path: Path)
         poll_interval=0.4,
         base_url="https://example.test",
     )
-    switched = writer.ensure_for_hq("hq-alpha")
+    switched = writer.open_round("hq-alpha", [10, 10])
 
     assert switched is True
-    assert writer.session_dir == tmp_path / "session_hq-alpha"
-    assert writer.turns_path == tmp_path / "session_hq-alpha" / "turns.jsonl"
-    assert writer.logs_path == tmp_path / "session_hq-alpha" / "logs.jsonl"
+    assert writer.session_dir.parent == tmp_path
+    assert writer.session_dir.name.startswith("session_")
+    assert writer.turns_path == writer.session_dir / "turns.jsonl"
+    assert writer.logs_path == writer.session_dir / "logs.jsonl"
+    assert writer.initial_hq_id == "hq-alpha"
+    assert writer.current_hq_id == "hq-alpha"
+    assert writer.initial_hq_position == [10, 10]
+    assert writer.current_hq_position == [10, 10]
 
     meta = json.loads((writer.session_dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["hqId"] == "hq-alpha"
+    assert meta["initialHqId"] == "hq-alpha"
+    assert meta["initialHqPosition"] == [10, 10]
     assert meta["strategy"] == "lateral"
     assert meta["submit"] is True
     assert meta["latencyAvg"] == 0.12
@@ -99,7 +122,7 @@ def test_session_writer_creates_session_dir_and_meta_on_first_hq(tmp_path: Path)
     assert meta["baseUrl"] == "https://example.test"
 
 
-def test_session_writer_ensure_is_idempotent_for_same_hq(tmp_path: Path):
+def test_session_writer_open_round_is_idempotent_while_round_active(tmp_path: Path):
     writer = SessionWriter(
         root=tmp_path,
         strategy_name="lateral",
@@ -108,17 +131,17 @@ def test_session_writer_ensure_is_idempotent_for_same_hq(tmp_path: Path):
         poll_interval=0.5,
         base_url="https://example.test",
     )
-    writer.ensure_for_hq("hq-1")
+    writer.open_round("hq-1", [10, 10])
     meta_path = writer.session_dir / "meta.json"
     original_meta_text = meta_path.read_text(encoding="utf-8")
 
-    switched = writer.ensure_for_hq("hq-1")
+    switched = writer.open_round("hq-1", [10, 10])
 
     assert switched is False
     assert meta_path.read_text(encoding="utf-8") == original_meta_text
 
 
-def test_session_writer_switches_dir_when_hq_changes(tmp_path: Path):
+def test_session_writer_tracks_hq_changes_without_switching_dir(tmp_path: Path):
     writer = SessionWriter(
         root=tmp_path,
         strategy_name="lateral",
@@ -127,16 +150,70 @@ def test_session_writer_switches_dir_when_hq_changes(tmp_path: Path):
         poll_interval=0.5,
         base_url="https://example.test",
     )
-    writer.ensure_for_hq("hq-1")
+    writer.open_round("hq-1", [10, 10])
     first_dir = writer.session_dir
 
-    switched = writer.ensure_for_hq("hq-2")
+    id_changed, position_changed, previous_hq_id, previous_hq_position = writer.note_hq("hq-2", [11, 10])
 
-    assert switched is True
-    assert writer.session_dir != first_dir
-    assert writer.session_dir == tmp_path / "session_hq-2"
+    assert id_changed is True
+    assert position_changed is True
+    assert previous_hq_id == "hq-1"
+    assert previous_hq_position == [10, 10]
+    assert writer.current_hq_id == "hq-2"
+    assert writer.initial_hq_id == "hq-1"
+    assert writer.current_hq_position == [11, 10]
+    assert writer.initial_hq_position == [10, 10]
+    assert writer.session_dir == first_dir
     assert first_dir.exists()
     assert (first_dir / "meta.json").exists()
+
+
+def test_session_writer_close_round_resets_state(tmp_path: Path):
+    writer = SessionWriter(
+        root=tmp_path,
+        strategy_name="lateral",
+        submit=False,
+        latency_avg=0.1,
+        poll_interval=0.5,
+        base_url="https://example.test",
+    )
+    writer.open_round("hq-1", [10, 10])
+    writer.note_hq("hq-2", [11, 10])
+
+    writer.close_round()
+
+    assert writer.initial_hq_id is None
+    assert writer.current_hq_id is None
+    assert writer.initial_hq_position is None
+    assert writer.current_hq_position is None
+    assert writer.session_dir is None
+    assert writer.turns_path is None
+    assert writer.logs_path is None
+
+
+def test_session_writer_reopens_same_hq_in_new_dir(tmp_path: Path):
+    writer = SessionWriter(
+        root=tmp_path,
+        strategy_name="lateral",
+        submit=False,
+        latency_avg=0.1,
+        poll_interval=0.5,
+        base_url="https://example.test",
+    )
+    writer.open_round("hq-1", [10, 10])
+    first_dir = writer.session_dir
+    writer.close_round()
+
+    reopened = writer.open_round("hq-1", [20, 20])
+
+    assert reopened is True
+    assert writer.session_dir != first_dir
+    assert writer.session_dir.name.startswith("session_")
+
+
+def test_grace_tick_constants_are_greater_than_one():
+    assert ARENA_INACTIVE_GRACE_TICKS > 1
+    assert HQ_MISSING_GRACE_TICKS > 1
 
 
 def test_describe_command_status_marks_server_side_errors():
