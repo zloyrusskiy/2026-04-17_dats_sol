@@ -37,6 +37,7 @@ MIN_POLL_SLEEP = 0.02
 LATENCY_ALPHA = 0.2
 LATENCY_JITTER_ALPHA = 0.2
 ARENA_WARMUP_SAMPLES = 3
+TURN_BOUNDARY_MARGIN = 0.03
 
 
 def available_strategy_names() -> list[str]:
@@ -165,6 +166,10 @@ def effective_latency(mean_latency: float, jitter: float) -> float:
 
 def warmup_complete(sample_count: int) -> bool:
     return sample_count >= ARENA_WARMUP_SAMPLES
+
+
+def compute_arena_sleep(next_turn_in: float, latency: float) -> float:
+    return max(MIN_POLL_SLEEP, next_turn_in - latency / 2.0 - TURN_BOUNDARY_MARGIN)
 
 
 def describe_command_status(
@@ -447,7 +452,7 @@ async def play_loop(
       2. latency := rtt / 2.
       3. If next_turn_in < 2*latency → warn, skip command (can't deliver in time).
       4. Else spawn decide+submit as a background task (does not block the loop).
-      5. Sleep (next_turn_in - latency), then loop.
+      5. Sleep (next_turn_in - latency / 2 - boundary_margin), then loop.
     """
     last_turn_no: int | None = None
     active_round = False
@@ -527,7 +532,7 @@ async def play_loop(
                 )
             last_turn_no = arena.turn_no
 
-        sleep_for = max(MIN_POLL_SLEEP, arena.next_turn_in - latency)
+        sleep_for = compute_arena_sleep(arena.next_turn_in, latency)
         await asyncio.sleep(sleep_for)
         arena, rtt = await safe_fetch_arena(client, turns_path, args.idle_sleep)
 

@@ -4,6 +4,9 @@ import httpx
 
 from scripts.run_session import (
     ARENA_WARMUP_SAMPLES,
+    MIN_POLL_SLEEP,
+    TURN_BOUNDARY_MARGIN,
+    compute_arena_sleep,
     effective_latency,
     configure_logging,
     compute_logs_backoff_seconds,
@@ -59,6 +62,18 @@ def test_update_latency_estimate_smooths_single_spike():
 def test_warmup_complete_requires_three_samples():
     assert warmup_complete(ARENA_WARMUP_SAMPLES - 1) is False
     assert warmup_complete(ARENA_WARMUP_SAMPLES) is True
+
+
+def test_compute_arena_sleep_uses_half_latency_and_boundary_margin():
+    sleep_for = compute_arena_sleep(next_turn_in=0.95, latency=0.06)
+
+    assert round(sleep_for, 3) == round(0.95 - 0.03 - TURN_BOUNDARY_MARGIN, 3)
+
+
+def test_compute_arena_sleep_respects_min_poll_sleep():
+    sleep_for = compute_arena_sleep(next_turn_in=0.01, latency=0.10)
+
+    assert sleep_for == MIN_POLL_SLEEP
 
 
 def test_compute_retry_after_seconds_uses_default_floor():
